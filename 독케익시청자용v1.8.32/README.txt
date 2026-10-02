@@ -3,7 +3,7 @@
 
 치지직 방송 감시 및 방송 타임라인 기록 프로그램
 
-현재 버전: v1.8.71
+현재 버전: v1.8.79
 
 dogcake proviewer는 치지직 방송 상태를 감시하면서 방송 중 원하는 순간을 타임라인으로 기록하고, 이후 치지직 VOD가 업로드되면 해당 타임라인을 VOD의 실제 재생 위치와 자동으로 연결하는 AutoHotkey v2 기반 프로그램입니다.
 
@@ -23,7 +23,7 @@ dogcake proviewer는 치지직 방송 상태를 감시하면서 방송 중 원�
   - 5초 후 재시도하고, 실패가 이어지면 최대 60초 간격까지 단계적으로 대기
   - 연결이 복구되면 기존 30초 감시 주기로 자동 복귀
 - 방송 카테고리 변경 이력 및 직전 카테고리 이용 시간 기록
-  - 기록 파일: category_history.csv
+  - 기록 파일: data\category_history.csv
   - 감시 주기 30초 기준으로 변경 시각은 실제 변경보다 최대 약 30초 늦을 수 있음
 
 방송이 잠시 종료되었다가 다시 시작되는 경우에도 방송 세션을 구분합니다.
@@ -66,7 +66,7 @@ dogcake proviewer는 치지직 방송 상태를 감시하면서 방송 중 원�
 
 예를 들어 작업 중인 프로그램이나 게임 등을 보호 앱으로 등록할 수 있습니다.
 
-보호 앱 설정은 protected_apps.ini에 저장됩니다.
+보호 앱 설정은 data\protected_apps.ini에 저장됩니다.
 
 
 2. 타임라인 메모
@@ -94,7 +94,7 @@ VOD링크: 연결된 치지직 VOD
 
 타임라인 데이터는 다음 파일에 저장됩니다.
 
-timeline.csv
+data\timeline.csv
 
 VOD가 연결되면 VOD 제목도 타임라인 뷰어에 표시됩니다.
 타임라인 뷰어의 'VOD 재연결' 버튼은 미연결 VOD를 재연결한 뒤, 이미 연결된 VOD를 포함해 제목이 비어 있는 행의 영상 제목도 함께 보완합니다.
@@ -284,7 +284,7 @@ VOD 링크를 입력하면 VOD 정보를 확인하여 방송 날짜를 지정할
 
 백업 폴더:
 
-timeline_backup\
+data\timeline_backup\
 
 백업 파일 예:
 
@@ -339,7 +339,7 @@ Ctrl + Alt + O
 Esc를 누르면 해당 입력을 취소합니다. 같은 조합을 여러 기능에 지정할 수 없으며,
 중복되거나 등록할 수 없는 조합은 오류 안내가 표시됩니다.
 
-단축키 설정은 settings.ini의 [Hotkeys] 항목에 저장됩니다.
+단축키 설정은 data\settings.ini의 [Hotkeys] 항목에 저장됩니다.
 
 
 14. 설정
@@ -357,7 +357,7 @@ Ctrl + Alt + L을 누르면 설정 화면을 열 수 있습니다.
 - YouTube 관련 기능
 - 기타 프로그램 설정
 
-설정은 settings.ini에 저장됩니다.
+설정은 data\settings.ini에 저장됩니다.
 
 
 15. YouTube 연동
@@ -387,8 +387,10 @@ YouTube 기능은 설정에서 활성화할 수 있습니다.
 관련 파일:
 
 chzzk_chat.ps1
-chzzk_chat_queue.txt
-chzzk_chat_trigger.txt
+data\chzzk_chat_queue.txt
+data\chzzk_chat_trigger.txt
+
+릴리스에 chzzk_chat.ps1을 첨부하면 기존 파일을 교체합니다. 첨부하지 않은 일반 업데이트는 기존 파일을 유지하고, 설치 폴더에 helper가 없을 때만 같은 버전 태그의 저장소 루트에서 새로 받습니다.
 
 채팅 감시 기능은 프로그램 실행 중 사용 설정에 따라 동작합니다.
 
@@ -398,14 +400,14 @@ chzzk_chat_trigger.txt
 
 프로그램 폴더에는 다음과 같은 파일이 생성될 수 있습니다.
 
-dogcake_proviewer_v1.8.44.ahk
-settings.ini
-protected_apps.ini
-timeline.csv
-timeline_backup\
+dogcake_proviewer_v1.8.79.ahk
+data\settings.ini
+data\protected_apps.ini
+data\timeline.csv
+data\timeline_backup\
 chzzk_chat.ps1
-chzzk_chat_queue.txt
-chzzk_chat_trigger.txt
+data\chzzk_chat_queue.txt
+data\chzzk_chat_trigger.txt
 dogicon.ico
 
 모든 파일이 항상 존재하는 것은 아니며 기능 사용 여부에 따라 생성됩니다.
@@ -440,7 +442,7 @@ AutoHotkey v1에서는 실행할 수 없습니다.
     +-- 타임라인 기록
              |
              v
-        timeline.csv
+        data\timeline.csv
              |
              v
         VOD 업로드 확인
@@ -503,13 +505,13 @@ AutoHotkey v1에서는 실행할 수 없습니다.
 VOD가 아직 존재하지 않는 경우 프로그램은 일정 시간 후 다시 확인합니다.
 
 
-[timeline.csv 관리]
+[data\timeline.csv 관리]
 
-timeline.csv에는 타임라인 기록이 저장됩니다.
+data\timeline.csv에는 타임라인 기록이 저장됩니다.
 
 직접 삭제하거나 수정하기 전에 백업을 권장합니다.
 
-자동 백업 파일은 timeline_backup\에 저장됩니다.
+자동 백업 파일은 data\timeline_backup\에 저장됩니다.
 
 
 [프로그램 폴더 이동]
@@ -520,10 +522,10 @@ timeline.csv에는 타임라인 기록이 저장됩니다.
 
 기존 데이터를 계속 사용하려면 다음 파일과 폴더도 함께 이동해야 합니다.
 
-settings.ini
-protected_apps.ini
-timeline.csv
-timeline_backup\
+data\settings.ini
+data\protected_apps.ini
+data\timeline.csv
+data\timeline_backup\
 
 
 22. 버전
