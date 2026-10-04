@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory=$true)]
     [string]$ChannelId,
 
@@ -6,17 +6,27 @@
     [string]$TriggerFile,
 
     [Parameter(Mandatory=$true)]
-    [string]$TriggerConfigFile
+    [string]$TriggerConfigFile,
+
+    [string]$LogFile = (Join-Path $PSScriptRoot 'chzzk_chat_debug.log')
 )
 
 $ErrorActionPreference = 'Continue'
+function Write-Trace {
+    param([string]$Message)
+    try {
+        $line = '[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff') + '] ' + $Message + [Environment]::NewLine
+        [IO.File]::AppendAllText($LogFile, $line, [Text.UTF8Encoding]::new($false))
+    } catch {}
+}
+Write-Trace ("HELPER_START channel=" + $ChannelId)
 
 
 # ============================================================
 # 고정 스트리머의 채팅 Channel ID
 # ============================================================
 
-$ChatChannelId = "N2lraP"
+$ChatChannelId = ""
 
 
 # ============================================================
@@ -58,63 +68,38 @@ catch {
 # 방송 상태 확인
 # ============================================================
 
-function Test-Live {
-
+function Get-LiveStatus {
     try {
-
-        $liveUrl =
-            "https://api.chzzk.naver.com/polling/v2/channels/$ChannelId/live-status"
-
-        $live = Invoke-RestMethod `
-            -Uri $liveUrl `
-            -Headers $Headers `
-            -Method Get `
-            -TimeoutSec 10
-
-        if ($live.content.status -eq "OPEN") {
-            return $true
-        }
-
-        return $false
-    }
-    catch {
-        return $false
+        $liveUrl = "https://api.chzzk.naver.com/polling/v2/channels/$ChannelId/live-status"
+        $live = Invoke-RestMethod -Uri $liveUrl -Headers $Headers -Method Get -TimeoutSec 10
+        Write-Trace ("LIVE status=" + $live.content.status + " chatChannelId=" + $live.content.chatChannelId)
+        return $live.content
+    } catch {
+        Write-Trace ("LIVE_ERROR " + $_.Exception.Message)
+        return $null
     }
 }
-
 
 # ============================================================
 # Access Token 획득
 # ============================================================
 
 function Get-AccessToken {
-
-    param(
-        [string]$ChatId
-    )
-
+    param([string]$ChatId)
     try {
-
-        $tokenUrl =
-            "https://comm-api.game.naver.com/nng_main/v1/chats/access-token?channelId=$([uri]::EscapeDataString($ChatId))&chatType=STREAMING"
-
-        $token = Invoke-RestMethod `
-            -Uri $tokenUrl `
-            -Headers $Headers `
-            -Method Get `
-            -TimeoutSec 10
-
+        $tokenUrl = "https://comm-api.game.naver.com/nng_main/v1/chats/access-token?channelId=$([uri]::EscapeDataString($ChatId))&chatType=STREAMING"
+        $token = Invoke-RestMethod -Uri $tokenUrl -Headers $Headers -Method Get -TimeoutSec 10
         if (-not $token.content.accessToken) {
+            Write-Trace ("TOKEN_MISSING id=" + $ChatId)
             return $null
         }
-
+        Write-Trace ("TOKEN_OK id=" + $ChatId)
         return [string]$token.content.accessToken
-    }
-    catch {
+    } catch {
+        Write-Trace ("TOKEN_ERROR id=" + $ChatId + " " + $_.Exception.Message)
         return $null
     }
 }
-
 
 # ============================================================
 # WebSocket 서버 계산
@@ -242,6 +227,8 @@ function Connect-Chat {
         # WebSocket 연결
         # ----------------------------------------------------
 
+        Write-Trace ("WS_OPENING id=" + $ChatId + " server=" + $server)
+
         $ws.ConnectAsync(
             [Uri]$wsUrl,
             [Threading.CancellationToken]::None
@@ -295,22 +282,46 @@ function Connect-Chat {
 
         # ----------------------------------------------------
         # 인증 응답 확인
-        # ----------------------------------------------------
 
         try {
-
-            $auth =
-                $authMessage |
-                ConvertFrom-Json
-
+            $auth = $authMessage | ConvertFrom-Json
         }
         catch {
-
+            Write-Trace "AUTH_JSON_ERROR"
             return $false
         }
 
+        $sid = [string]$auth.bdy.sid
+        Write-Trace ("AUTH cmd=" + $auth.cmd + " hasSid=" + (-not [string]::IsNullOrWhiteSpace($sid)))
+        if ([string]::IsNullOrWhiteSpace($sid)) {
+            return $false
+        }
 
-        # ----------------------------------------------------
+        $recentChatRequest = @{
+            ver = '2'
+            cmd = 5101
+            svcid = 'game'
+            cid = $ChatId
+            tid = 2
+            sid = $sid
+            bdy = @{ recentMessageCount = 1 }
+        } | ConvertTo-Json -Depth 8 -Compress
+
+        Send-Json $ws $recentChatRequest
+        $recentChatResponse = Receive-Message $ws
+        if ($null -eq $recentChatResponse) {
+            Write-Trace "RECENT_RESPONSE_MISSING"
+            return $false
+        }
+
+        try {
+            $recentData = $recentChatResponse | ConvertFrom-Json
+            Write-Trace ("RECENT cmd=" + $recentData.cmd)
+        }
+        catch {
+            Write-Trace "RECENT_JSON_ERROR"
+            return $false
+        }
         # 채팅 수신 루프
         # ----------------------------------------------------
 
@@ -360,6 +371,7 @@ function Connect-Chat {
                 # ------------------------------------------------
 
                 if ($data.cmd -eq 93101) {
+                    Write-Trace ("CHAT_BATCH count=" + @($data.bdy).Count)
 
                     if (-not $data.bdy) {
                         continue
@@ -377,8 +389,9 @@ function Connect-Chat {
                             [string]$item.msg
 
 
-                        # 정확히 일치하는 경우만 AHK에 전달
-                        if ($msg -eq $TriggerText) {
+                        # 키워드가 포함된 채팅을 AHK에 전달
+                        if (-not [string]::IsNullOrWhiteSpace($TriggerText) -and $msg.IndexOf($TriggerText, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            Write-Trace "KEYWORD_MATCH"
 
                             try {
 
@@ -386,9 +399,11 @@ function Connect-Chat {
                                     -LiteralPath $TriggerFile `
                                     -Value $msg `
                                     -Encoding UTF8
+                                Write-Trace "QUEUE_WRITE_OK"
 
                             }
                             catch {
+                                Write-Trace ("QUEUE_WRITE_ERROR " + $_.Exception.Message)
                             }
                         }
                     }
@@ -442,8 +457,21 @@ while ($true) {
         # 방송이 꺼져 있으면 잠시 후 다시 확인
         # ----------------------------------------------------
 
-        if (-not (Test-Live)) {
+        $LiveStatus =
+            Get-LiveStatus
 
+        if ($null -eq $LiveStatus -or $LiveStatus.status -ne "OPEN") {
+
+            Start-Sleep -Seconds 5
+            continue
+        }
+
+        $ChatChannelId =
+            [string]$LiveStatus.chatChannelId
+
+        if ([string]::IsNullOrWhiteSpace($ChatChannelId)) {
+
+            Write-Trace "LIVE_CHAT_ID_MISSING"
             Start-Sleep -Seconds 5
             continue
         }
@@ -481,7 +509,7 @@ while ($true) {
 
     }
     catch {
-
+        Write-Trace ("MAIN_ERROR " + $_.Exception.Message)
         Start-Sleep -Seconds 5
     }
 }
