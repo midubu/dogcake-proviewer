@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ; ============================================================
@@ -10,65 +10,18 @@
 ; Ctrl + Alt + L : 설정
 ; Ctrl + Alt + K : 타임라인 메모
 ; Ctrl + Alt + O : 타임라인 뷰어
+; Ctrl + Alt + [ : LoL 조회
 ;
 ; ============================================================
 
 
-; dogcake proviewer v1.8.27
-; CSV 자동 백업 추가
+; dogcake proviewer v1.8.85
+; CSV 자동 백업 + GitHub 자동 업데이트
 ; ============================================================
 ; 단축키
 ; ============================================================
 
-^!c::
-{
-    CancelShutdownReservation(true)
-}
-
-
-^!p::
-{
-    result := MsgBox(
-        "치지직 방송 감시를 종료할까요?",
-        "방송 감시 종료",
-        "YesNo Icon?"
-    )
-
-    if (result = "Yes")
-        ExitApp
-}
-
-
-^!m::
-{
-    Sleep(2000)
-
-    SendMessage(
-        0x112,
-        0xF170,
-        2,
-        ,
-        "Program Manager"
-    )
-}
-
-
-^!l::
-{
-    ShowSettingsGui()
-}
-
-
-^!k::
-{
-    ShowTimelineMemo()
-}
-
-
-^!o::
-{
-    ShowTimelineViewer()
-}
+; 단축키는 settings.ini의 사용자 설정에 따라 시작 시 등록한다.
 
 
 ; ============================================================
@@ -82,6 +35,26 @@ try
     )
 }
 
+; 업데이트 메뉴
+try
+{
+    A_TrayMenu.Add("업데이트 확인", CheckForUpdates)
+    A_TrayMenu.Add("LoL 조회", ShowLolRankGui)
+}
+catch
+{
+}
+
+
+; ============================================================
+; 업데이트 설정
+; ============================================================
+
+CurrentVersion := "1.8.85"
+UpdateRepo := "midubu/dogcake-proviewer"
+UpdateApiUrl := "https://api.github.com/repos/" . UpdateRepo . "/releases/latest"
+UpdateUserAgent := "dogcake-proviewer/" . CurrentVersion
+
 
 ; ============================================================
 ; 사용자 설정
@@ -90,11 +63,36 @@ try
 ChannelID :=
     "b68af124ae2f1743a1dcbf5e2ab41e0b"
 
+; Cloudflare Worker 배포 후 URL을 입력한다. Riot API Key는 이 파일에 저장하지 않는다.
+LolWorkerBaseUrl := ""
+LolRankSettingsFile := A_ScriptDir "\data\lol_rank.ini"
+LolRankCooldownSeconds := 10
+LolRankLastRequestTick := 0
+LolRankHttp := 0
+LolRankRequestStartedTick := 0
+LolRankGuiObj := 0
+LolRankRiotIdEdit := 0
+LolRankStatusText := 0
+LolRankNameText := 0
+LolRankRankText := 0
+LolRankRecordText := 0
+LolRankRateText := 0
+LolGameStatusText := 0
+LolGameNotifyCheckbox := 0
+LolMatchPushPID := 0
+LolMatchPushRestartTick := 0
+
+DataDir :=
+    A_ScriptDir "\data"
+
+LolMatchEventDirectory :=
+    DataDir "\lol_match_events"
+
 SettingsFile :=
-    A_ScriptDir "\settings.ini"
+    DataDir "\settings.ini"
 
 ProtectedAppsFile :=
-    A_ScriptDir "\protected_apps.ini"
+    DataDir "\protected_apps.ini"
 
 DefaultShutdownEnabled := 1
 DefaultShutdownMinutes := 5
@@ -103,6 +101,26 @@ DefaultNightEnd := "04:00"
 DefaultYoutubeEnabled := 0
 DefaultYoutubeTrigger := "똥! ㅋㅋ"
 DefaultYoutubeCooldown := 60
+DefaultHotkeys := Map(
+    "CancelShutdown", "^!c",
+    "StopMonitor", "^!p",
+    "MonitorOff", "^!m",
+    "Settings", "^!l",
+    "TimelineMemo", "^!k",
+    "TimelineViewer", "^!o",
+    "LolRank", "^!SC01A"
+)
+HotkeyLabels := Map(
+    "CancelShutdown", "종료 예약 취소",
+    "StopMonitor", "방송 감시 종료",
+    "MonitorOff", "모니터 끄기",
+    "Settings", "설정 열기",
+    "TimelineMemo", "타임라인 메모",
+    "TimelineViewer", "타임라인 뷰어",
+    "LolRank", "LoL 조회"
+)
+HotkeyBindings := Map()
+ActiveHotkeyInputHook := 0
 
 ShutdownEnabled :=
     DefaultShutdownEnabled
@@ -129,6 +147,8 @@ ShutdownDelay :=
     ShutdownMinutes * 60
 
 CheckInterval := 30000
+LiveApiRetryDelay := 5000
+LiveApiRetryMaxDelay := 60000
 
 
 ; ============================================================
@@ -156,11 +176,14 @@ VIDEO_LIST_BASE_URL :=
 ; ============================================================
 
 TimelineFile :=
-    A_ScriptDir "\timeline.csv"
+    DataDir "\timeline.csv"
+
+CategoryHistoryFile :=
+    DataDir "\category_history.csv"
 
 ; CSV 백업 폴더
 TimelineBackupDir :=
-    A_ScriptDir "\timeline_backup"
+    DataDir "\timeline_backup"
 
 ; 같은 자동 처리 과정에서 너무 많은 백업이 생기는 것을 방지
 LastTimelineBackupAt := 0
@@ -182,11 +205,26 @@ BroadcastStart := ""
 LastBroadcastStart := ""
 LastBroadcastEnd := ""
 LastStatus := ""
+LastLiveStatusCheckTick := 0
+
+ActiveCategorySession := ""
+ActiveCategoryId := ""
+ActiveCategoryName := ""
+ActiveCategoryStart := ""
 
 TimelineViewerLinks :=
     Map()
 
 TimelineViewerRows :=
+    Map()
+
+TimelineViewerHoverInfo :=
+    Map()
+
+TimelineViewerStatusColors :=
+    Map()
+
+SquareCheckboxControls :=
     Map()
 
 TimelineCalendarState :=
@@ -198,8 +236,12 @@ TimelineCalendarState :=
         DayControls: Map(),
         WeekControls: [],
         CalendarSlots: [],
+        SelectionFrame: [],
         List: 0,
-        SummaryText: 0
+        StatusImageList: 0,
+        SummaryText: 0,
+        SearchEdit: 0,
+        HoverRow: -2
     }
 
 
@@ -226,10 +268,13 @@ YoutubeCooldownUntil := 0
 ChatHelperPID := 0
 
 ChatQueueFile :=
-    A_ScriptDir "\chzzk_chat_queue.txt"
+    DataDir "\chzzk_chat_queue.txt"
+
+ChatDebugLogFile :=
+    DataDir "\youtube_trigger_debug.log"
 
 ChatTriggerConfigFile :=
-    A_ScriptDir "\chzzk_chat_trigger.txt"
+    DataDir "\chzzk_chat_trigger.txt"
 
 ChatHelperScript :=
     A_ScriptDir "\chzzk_chat.ps1"
@@ -246,14 +291,102 @@ EditSubclassCallback := 0
 
 
 ; ============================================================
+PrepareDataDirectory()
+{
+    global DataDir
+
+    if !DirExist(DataDir)
+        DirCreate(DataDir)
+
+    legacyFiles := [
+        "settings.ini",
+        "protected_apps.ini",
+        "timeline.csv",
+        "category_history.csv",
+        "chzzk_chat_debug.log",
+        "chzzk_chat_trigger.txt",
+        "youtube_trigger_debug.log"
+    ]
+
+    for fileName in legacyFiles
+    {
+        oldPath := A_ScriptDir "\" fileName
+        newPath := DataDir "\" fileName
+        if FileExist(oldPath) && !FileExist(newPath)
+        {
+            try FileMove(oldPath, newPath, false)
+            catch
+            {
+                try FileCopy(oldPath, newPath, false)
+                catch
+                {
+                }
+            }
+        }
+
+        ; If both copies exist, keep the active data copy and archive the
+        ; root-level legacy copy inside data instead of leaving it beside AHK.
+        if FileExist(oldPath) && FileExist(newPath)
+        {
+            legacyDir := DataDir "\legacy_migration"
+            if !DirExist(legacyDir)
+                try DirCreate(legacyDir)
+
+            if DirExist(legacyDir)
+            {
+                archivePath := legacyDir "\" fileName ".legacy_" A_Now
+                try FileMove(oldPath, archivePath, false)
+                if FileExist(oldPath) && !FileExist(archivePath)
+                {
+                    try FileCopy(oldPath, archivePath, false)
+                    if FileExist(archivePath)
+                        try FileDelete(oldPath)
+                }
+            }
+        }
+    }
+
+    oldBackupDir := A_ScriptDir "\timeline_backup"
+    newBackupDir := DataDir "\timeline_backup"
+    if DirExist(oldBackupDir)
+    {
+        if !DirExist(newBackupDir)
+        {
+            try DirMove(oldBackupDir, newBackupDir)
+            catch
+            {
+                DirCreate(newBackupDir)
+            }
+        }
+
+        if DirExist(newBackupDir)
+        {
+            Loop Files, oldBackupDir "\*.csv", "F"
+            {
+                target := newBackupDir "\" A_LoopFileName
+                if !FileExist(target)
+                {
+                    try FileCopy(A_LoopFileFullPath, target, false)
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+    }
+}
 ; 초기화
 ; ============================================================
 
+PrepareDataDirectory()
 LoadSettings()
+RegisterUserHotkeys()
 LoadProtectedApps()
 
 StartChatMonitor()
 OnExit(StopChatMonitor)
+OnExit(StopLolMatchPush)
+OnExit(FinalizeBroadcastCategory)
 
 SetTimer(
     PollChatTrigger,
@@ -275,6 +408,602 @@ SetTimer(
 
 CheckLiveStatus()
 CheckPendingVodMatches()
+
+; A single Worker-side poll finds completed matches and pushes them over the
+; WebSocket. This timer only reads local event files; it makes no network calls.
+SetTimer(PollLolMatchPushEvents, 500)
+SetTimer(EnsureLolMatchPushConnection, 5000)
+RefreshLolGamePollingState()
+
+; 프로그램 시작 후 잠시 기다린 다음 업데이트를 확인한다.
+; 네트워크 확인 때문에 프로그램 시작이 지연되지 않도록 비동기로 실행한다.
+SetTimer(AutoCheckForUpdates, -5000)
+
+
+; ============================================================
+; GitHub 업데이트
+; ============================================================
+
+CheckForUpdates(*)
+{
+    CheckForUpdatesCore(true)
+}
+
+
+AutoCheckForUpdates(*)
+{
+    CheckForUpdatesCore(false)
+}
+
+
+CheckForUpdatesCore(ManualCheck := false)
+{
+    global CurrentVersion
+    global UpdateApiUrl
+    global UpdateUserAgent
+
+    try
+    {
+        Http := ComObject("WinHttp.WinHttpRequest.5.1")
+        Http.Open("GET", UpdateApiUrl, false)
+        Http.SetRequestHeader("User-Agent", UpdateUserAgent)
+        Http.SetRequestHeader("Accept", "application/vnd.github+json")
+        Http.SetTimeouts(3000, 3000, 5000, 5000)
+        Http.Send()
+
+        if (Http.Status != 200)
+        {
+            if ManualCheck
+                MsgBox("GitHub 업데이트 정보를 가져오지 못했습니다.`nHTTP 상태: " . Http.Status, "업데이트 확인", "Icon!")
+            return false
+        }
+
+        Response := Http.ResponseText
+    }
+    catch as Err
+    {
+        ; 시작 시 자동 확인은 조용히 실패한다.
+        ; 사용자가 메뉴에서 직접 확인한 경우에만 오류를 표시한다.
+        if ManualCheck
+            MsgBox("업데이트 확인에 실패했습니다.`n`n" . Err.Message, "업데이트 확인", "Icon!")
+        return false
+    }
+
+    if !RegExMatch(Response, '"tag_name"\s*:\s*"([^"\\]+)"', &TagMatch)
+    {
+        if ManualCheck
+            MsgBox("GitHub Release 버전을 확인하지 못했습니다.", "업데이트 확인", "Icon!")
+        return false
+    }
+
+    LatestVersion := TagMatch[1]
+    if (SubStr(LatestVersion, 1, 1) = "v")
+        LatestVersion := SubStr(LatestVersion, 2)
+
+    if !(VerCompare(LatestVersion, CurrentVersion) > 0)
+    {
+        if (VerCompare(LatestVersion, CurrentVersion) = 0)
+            RefreshChatHelper(LatestVersion, Response, ManualCheck)
+
+        if ManualCheck
+            MsgBox("현재 최신 버전입니다.`n`n현재 버전: v" . CurrentVersion, "업데이트 확인", "Iconi")
+        return true
+    }
+
+    ; Release Asset은 이름/업로드 상태에 따라 404가 날 수 있으므로
+    ; 우선 Asset URL을 찾고, 실제 다운로드 단계에서 실패하면
+    ; 해당 태그의 raw 파일 URL로 자동 재시도한다.
+    DownloadUrl := ""
+    HelperDownloadUrl := ""
+    if RegExMatch(Response, '"browser_download_url"\s*:\s*"([^"]+\.ahk)"', &AssetMatch)
+        DownloadUrl := AssetMatch[1]
+    if RegExMatch(Response, '"browser_download_url"\s*:\s*"([^"]+\.ps1)"', &HelperAssetMatch)
+        HelperDownloadUrl := HelperAssetMatch[1]
+
+    Result := MsgBox(
+        "새 버전이 있습니다.`n`n"
+        . "현재 버전: v" . CurrentVersion . "`n"
+        . "최신 버전: v" . LatestVersion . "`n`n"
+        . "지금 업데이트할까요?",
+        "dogcake proviewer 업데이트",
+        "YesNo Iconi"
+    )
+
+    if (Result != "Yes")
+        return true
+
+    return StartSelfUpdate(DownloadUrl, HelperDownloadUrl, LatestVersion)
+}
+
+
+StartSelfUpdate(DownloadUrl, HelperDownloadUrl, LatestVersion)
+{
+    global CurrentVersion
+
+    TempBase := A_Temp "\\dogcake_proviewer_update_" A_TickCount
+    TempFile := TempBase ".ahk"
+    TempHelperFile := TempBase ".ps1"
+    HelperTargetFile := A_ScriptDir . "\chzzk_chat.ps1"
+    UpdaterFile := TempBase "_updater.ahk"
+
+    RawUrl := "https://raw.githubusercontent.com/midubu/dogcake-proviewer/v"
+        . LatestVersion
+        . "/dogcake_proviewer_v"
+        . LatestVersion
+        . ".ahk"
+
+    HelperRawUrl := "https://raw.githubusercontent.com/midubu/dogcake-proviewer/v"
+        . LatestVersion
+        . "/chzzk_chat.ps1"
+
+    Downloaded := false
+    FirstError := ""
+
+    ; 1차: GitHub Release Asset
+    if (DownloadUrl != "")
+    {
+        try
+        {
+            DownloadFileFromUrl(DownloadUrl, TempFile)
+            Downloaded := ValidateDownloadedAhk(TempFile, LatestVersion)
+            if !Downloaded
+                try FileDelete(TempFile)
+        }
+        catch as Err
+        {
+            FirstError := Err.Message
+            try FileDelete(TempFile)
+        }
+    }
+
+    ; 2차: 해당 Release tag의 raw 파일
+    if !Downloaded
+    {
+        try
+        {
+            DownloadFileFromUrl(RawUrl, TempFile)
+            Downloaded := ValidateDownloadedAhk(TempFile, LatestVersion)
+            if !Downloaded
+                try FileDelete(TempFile)
+        }
+        catch as Err
+        {
+            SecondError := Err.Message
+            try FileDelete(TempFile)
+        }
+    }
+
+    if !Downloaded
+    {
+        Detail := "업데이트 파일을 다운로드하지 못했습니다."
+        if (FirstError != "")
+            Detail .= Chr(10) . Chr(10) . "Release Asset: " . FirstError
+        if IsSet(SecondError) && (SecondError != "")
+            Detail .= Chr(10) . "Raw 파일: " . SecondError
+
+        MsgBox(Detail, "업데이트 실패", "Icon!")
+        return false
+    }
+
+    ; The .ps1 release asset is optional. Keep an installed helper unless the release includes one.
+    HelperDownloaded := false
+    NeedCreateHelper := !FileExist(HelperTargetFile)
+    UpdateHelper := (HelperDownloadUrl != "" || NeedCreateHelper)
+    if (HelperDownloadUrl != "")
+    {
+        try
+        {
+            DownloadFileFromUrl(HelperDownloadUrl, TempHelperFile)
+            HelperDownloaded := ValidateDownloadedPs1(TempHelperFile)
+            if !HelperDownloaded
+                try FileDelete(TempHelperFile)
+        }
+        catch as Err
+        {
+            HelperDownloadError := Err.Message
+            try FileDelete(TempHelperFile)
+        }
+        if !HelperDownloaded
+        {
+            Detail := "릴리스에 포함된 채팅 helper를 확인하지 못해 업데이트를 중단했습니다."
+            if IsSet(HelperDownloadError) && (HelperDownloadError != "")
+                Detail .= Chr(10) . Chr(10) . HelperDownloadError
+            try FileDelete(TempFile)
+            MsgBox(Detail, "업데이트 실패", "Icon!")
+            return false
+        }
+    }
+    if (!HelperDownloaded && NeedCreateHelper)
+    {
+        try
+        {
+            DownloadFileFromUrl(HelperRawUrl, TempHelperFile)
+            HelperDownloaded := ValidateDownloadedPs1(TempHelperFile)
+            if !HelperDownloaded
+                try FileDelete(TempHelperFile)
+        }
+        catch as Err
+        {
+            HelperDownloadError := Err.Message
+            try FileDelete(TempHelperFile)
+        }
+    }
+
+    if (UpdateHelper && !HelperDownloaded)
+    {
+        Detail := "필요한 채팅 helper를 다운로드하지 못해 업데이트를 중단했습니다."
+        if IsSet(HelperDownloadError) && (HelperDownloadError != "")
+            Detail .= Chr(10) . Chr(10) . HelperDownloadError
+        try FileDelete(TempFile)
+        MsgBox(Detail, "업데이트 실패", "Icon!")
+        return false
+    }
+
+    if !FileExist(TempFile)
+    {
+        MsgBox("업데이트 파일을 다운로드하지 못했습니다.", "업데이트 실패", "Icon!")
+        return false
+    }
+
+    try
+    {
+        FileSize := FileGetSize(TempFile)
+        if (FileSize < 10000)
+        {
+            FileDelete(TempFile)
+            MsgBox("다운로드한 업데이트 파일의 크기가 비정상적입니다.", "업데이트 실패", "Icon!")
+            return false
+        }
+    }
+    catch as Err
+    {
+        try FileDelete(TempFile)
+        MsgBox("다운로드한 업데이트 파일을 확인하지 못했습니다.`n`n" . Err.Message, "업데이트 실패", "Icon!")
+        return false
+    }
+
+    OldTargetFile := A_ScriptFullPath
+    NewTargetFile := A_ScriptDir . "\dogcake_proviewer_v" . LatestVersion . ".ahk"
+    HelperBackupFile := TempBase . ".ps1.bak"
+    AppDir := A_ScriptDir
+    AHKExe := A_ScriptDir . "\AutoHotkey64.exe"
+    if !FileExist(AHKExe)
+        AHKExe := A_AhkPath
+    CurrentPID := DllCall("GetCurrentProcessId")
+    StartupDir := A_Startup
+    ShortcutFile := StartupDir . "\독케익시청자용.lnk"
+    IconFile := AppDir . "\\dogicon.ico"
+
+    QTemp := UpdaterQuote(TempFile)
+    QHelperTemp := UpdaterQuote(TempHelperFile)
+    QHelperTarget := UpdaterQuote(HelperTargetFile)
+    QHelperBackup := UpdaterQuote(HelperBackupFile)
+    QOld := UpdaterQuote(OldTargetFile)
+    QNew := UpdaterQuote(NewTargetFile)
+    QApp := UpdaterQuote(AppDir)
+    QExe := UpdaterQuote(AHKExe)
+    QStartup := UpdaterQuote(StartupDir)
+    QShortcut := UpdaterQuote(ShortcutFile)
+    QIcon := UpdaterQuote(IconFile)
+    QSelf := UpdaterQuote(UpdaterFile)
+
+    UpdaterScript :=
+        '#Requires AutoHotkey v2.0`r`n'
+        . '#SingleInstance Force`r`n`r`n'
+        . 'source := ' . QTemp . '`r`n'
+        . 'updateHelper := ' . (UpdateHelper ? 'true' : 'false') . '`r`n'
+        . 'helperSource := ' . QHelperTemp . '`r`n'
+        . 'helperTarget := ' . QHelperTarget . '`r`n'
+        . 'helperBackup := ' . QHelperBackup . '`r`n'
+        . 'oldTarget := ' . QOld . '`r`n'
+        . 'newTarget := ' . QNew . '`r`n'
+        . 'appDir := ' . QApp . '`r`n'
+        . 'ahkExe := ' . QExe . '`r`n'
+        . 'startupDir := ' . QStartup . '`r`n'
+        . 'shortcutFile := ' . QShortcut . '`r`n'
+        . 'iconFile := ' . QIcon . '`r`n'
+        . 'selfFile := ' . QSelf . '`r`n'
+        . 'processId := ' . CurrentPID . '`r`n`r`n'
+        . 'UpdaterQuote(Text)`r`n'
+        . '{`r`n'
+        . '    return Chr(34) . StrReplace(Text, Chr(34), Chr(34) . Chr(34)) . Chr(34)`r`n'
+        . '}`r`n`r`n'
+        . 'try`r`n'
+        . '{`r`n'
+        . '    Loop 120`r`n'
+        . '    {`r`n'
+        . '        if !ProcessExist(processId)`r`n'
+        . '            break`r`n'
+        . '        Sleep(500)`r`n'
+        . '    }`r`n`r`n'
+        . '    if ProcessExist(processId)`r`n'
+        . '        throw Error("기존 프로그램이 종료되지 않았습니다.")`r`n`r`n'
+        . '    if !DirExist(appDir)`r`n'
+        . '        throw Error("프로그램 폴더를 찾을 수 없습니다. " . appDir)`r`n`r`n'
+        . '    hadHelper := false`r`n'
+        . '    if updateHelper`r`n'
+        . '    {`r`n'
+        . '        if !FileExist(helperSource)`r`n'
+        . '            throw Error("새 채팅 helper 파일을 찾을 수 없습니다.")`r`n'
+        . '        hadHelper := FileExist(helperTarget)`r`n'
+        . '        if hadHelper`r`n'
+        . '            FileCopy(helperTarget, helperBackup, true)`r`n'
+        . '        FileMove(helperSource, helperTarget, true)`r`n'
+        . '        if !FileExist(helperTarget)`r`n'
+        . '            throw Error("새 채팅 helper 설치에 실패했습니다.")`r`n'
+        . '    }`r`n`r`n'
+        . '    if FileExist(newTarget)`r`n'
+        . '        FileDelete(newTarget)`r`n`r`n'
+        . '    try`r`n'
+        . '        FileMove(source, newTarget, true)`r`n'
+        . '    catch as installErr`r`n'
+        . '    {`r`n'
+        . '        if updateHelper && hadHelper && FileExist(helperBackup)`r`n'
+        . '            FileCopy(helperBackup, helperTarget, true)`r`n'
+        . '        throw installErr`r`n'
+        . '    }`r`n`r`n'
+        . '    if !FileExist(newTarget)`r`n'
+        . '        throw Error("새 버전 파일 생성에 실패했습니다.")`r`n`r`n'
+        . '    if !DirExist(startupDir)`r`n'
+        . '        DirCreate(startupDir)`r`n`r`n'
+        . '    if FileExist(shortcutFile)`r`n'
+        . '        try FileDelete(shortcutFile)`r`n`r`n'
+        . '    Loop Files, startupDir . "\독케익시청자용v*.lnk", "F"`r`n'
+        . '    {`r`n'
+        . '        try FileDelete(A_LoopFileFullPath)`r`n'
+        . '    }`r`n`r`n'
+        . '    if !FileExist(ahkExe)`r`n'
+        . '        throw Error("AutoHotkey64.exe를 찾을 수 없습니다. " . ahkExe)`r`n`r`n'
+        . '    shell := ComObject("WScript.Shell")`r`n'
+        . '    link := shell.CreateShortcut(shortcutFile)`r`n'
+        . '    link.TargetPath := ahkExe`r`n'
+        . '    link.Arguments := Chr(34) . newTarget . Chr(34)`r`n'
+        . '    link.WorkingDirectory := appDir`r`n'
+        . '    if FileExist(iconFile)`r`n'
+        . '        link.IconLocation := iconFile`r`n'
+        . '    else`r`n'
+        . '        link.IconLocation := ahkExe`r`n'
+        . '    link.Save()`r`n`r`n'
+        . '    if !FileExist(shortcutFile)`r`n'
+        . '        throw Error("시작프로그램 바로가기 생성에 실패했습니다.")`r`n`r`n'
+        . '    if (oldTarget != newTarget) && FileExist(oldTarget)`r`n'
+        . '        try FileDelete(oldTarget)`r`n`r`n'
+        . '    if updateHelper && FileExist(helperBackup)`r`n'
+        . '        try FileDelete(helperBackup)`r`n`r`n'
+        . '    Run(UpdaterQuote(ahkExe) . " " . UpdaterQuote(newTarget), appDir)`r`n'
+        . '    Sleep(1000)`r`n'
+        . '    try FileDelete(selfFile)`r`n'
+        . '    ExitApp()`r`n'
+        . '}`r`n'
+        . 'catch as Err`r`n'
+        . '{`r`n'
+        . '    if updateHelper && FileExist(helperBackup)`r`n'
+        . '        try FileCopy(helperBackup, helperTarget, true)`r`n`r`n'
+        . '    MsgBox("업데이트에 실패했습니다." . Chr(10) . Chr(10) . Err.Message . Chr(10) . Chr(10) . "업데이트 도우미: " . selfFile, "dogcake proviewer 업데이트 실패", "Icon!")`r`n'
+        . '    ExitApp(1)`r`n'
+        . '}`r`n'
+
+    try
+    {
+        FileAppend(UpdaterScript, UpdaterFile, "UTF-8")
+
+        if !FileExist(UpdaterFile)
+            throw Error("업데이트 도우미 파일을 만들지 못했습니다.")
+
+        Run(UpdaterQuote(AHKExe) . " " . UpdaterQuote(UpdaterFile), AppDir)
+
+        ToolTip(
+            "🔄 v" . LatestVersion . " 업데이트를 준비했습니다.`n"
+            . "프로그램을 종료한 후 자동으로 교체·재실행합니다."
+        )
+        SetTimer(ClearTimelineToolTip, -3000)
+
+        Sleep(500)
+        ExitApp()
+    }
+    catch as Err
+    {
+        try FileDelete(TempFile)
+        try FileDelete(TempHelperFile)
+        try FileDelete(UpdaterFile)
+
+        MsgBox(
+            "업데이트를 시작하지 못했습니다.`n`n"
+            . Err.Message,
+            "업데이트 실패",
+            "Icon!"
+        )
+        return false
+    }
+}
+
+
+
+RefreshChatHelper(LatestVersion, ReleaseResponse, ManualCheck := false)
+{
+    global ChatHelperScript
+
+    HelperUrl := ""
+    if RegExMatch(ReleaseResponse, '"browser_download_url"\s*:\s*"([^"]+\.ps1)"', &HelperAssetMatch)
+        HelperUrl := HelperAssetMatch[1]
+
+    RawUrl := "https://raw.githubusercontent.com/midubu/dogcake-proviewer/v"
+        . LatestVersion
+        . "/chzzk_chat.ps1"
+    TempHelper := A_Temp . "\dogcake_helper_refresh_" . A_TickCount . ".ps1"
+    Downloaded := false
+    NeedCreateHelper := !FileExist(ChatHelperScript)
+
+    if (HelperUrl = "" && !NeedCreateHelper)
+        return true
+
+    if (HelperUrl != "")
+    {
+        try
+        {
+            DownloadFileFromUrl(HelperUrl, TempHelper)
+            Downloaded := ValidateDownloadedPs1(TempHelper)
+            if !Downloaded
+                try FileDelete(TempHelper)
+        }
+        catch
+        {
+            try FileDelete(TempHelper)
+        }
+    }
+
+    if (!Downloaded && (HelperUrl != "" || NeedCreateHelper))
+    {
+        try
+        {
+            DownloadFileFromUrl(RawUrl, TempHelper)
+            Downloaded := ValidateDownloadedPs1(TempHelper)
+            if !Downloaded
+                try FileDelete(TempHelper)
+        }
+        catch
+        {
+            try FileDelete(TempHelper)
+        }
+    }
+
+    if !Downloaded
+        return false
+
+    BackupHelper := TempHelper . ".bak"
+    HadHelper := FileExist(ChatHelperScript)
+    try
+    {
+        if FileExist(ChatHelperScript)
+        {
+            ExistingContent := FileRead(ChatHelperScript, "UTF-8")
+            DownloadedContent := FileRead(TempHelper, "UTF-8")
+            if (ExistingContent = DownloadedContent)
+            {
+                FileDelete(TempHelper)
+                return true
+            }
+        }
+
+        if HadHelper
+            FileCopy(ChatHelperScript, BackupHelper, true)
+
+        StopChatMonitor()
+        StopLolMatchPush()
+        FileMove(TempHelper, ChatHelperScript, true)
+        if !FileExist(ChatHelperScript)
+            throw Error("채팅 helper 파일 교체에 실패했습니다.")
+
+        StartChatMonitor()
+        RefreshLolGamePollingState()
+        if FileExist(BackupHelper)
+            FileDelete(BackupHelper)
+
+        if ManualCheck
+            TrayTip("보조 파일 업데이트", "채팅 helper를 최신 버전으로 교체했습니다.", 2)
+        return true
+    }
+    catch as Err
+    {
+        if FileExist(BackupHelper)
+            try FileCopy(BackupHelper, ChatHelperScript, true)
+        if HadHelper
+        {
+            StartChatMonitor()
+            RefreshLolGamePollingState()
+        }
+        try FileDelete(TempHelper)
+        try FileDelete(BackupHelper)
+        if ManualCheck
+            MsgBox("채팅 helper 갱신에 실패했습니다.`n`n" . Err.Message, "업데이트 오류", "Icon!")
+        return false
+    }
+}
+
+
+UpdaterQuote(Text)
+{
+    return '"' . StrReplace(Text, '"', '""') . '"'
+}
+
+
+ValidateDownloadedAhk(FilePath, LatestVersion)
+{
+    if !FileExist(FilePath)
+        return false
+
+    try
+    {
+        Content := FileRead(FilePath, "UTF-8")
+    }
+    catch
+    {
+        try Content := FileRead(FilePath, "CP949")
+        catch
+            return false
+    }
+
+    if !InStr(Content, "#Requires AutoHotkey v2.0")
+        return false
+
+    VersionNeedle := "CurrentVersion := " . Chr(34) . LatestVersion . Chr(34)
+    if !InStr(Content, VersionNeedle)
+        return false
+
+    return true
+}
+
+
+ValidateDownloadedPs1(FilePath)
+{
+    if !FileExist(FilePath)
+        return false
+
+    try
+    {
+        if (FileGetSize(FilePath) < 1000)
+            return false
+
+        Content := FileRead(FilePath, "UTF-8")
+    }
+    catch
+    {
+        return false
+    }
+
+    return (
+        InStr(Content, "[string]$ChannelId")
+        && InStr(Content, "[string]$TriggerFile")
+        && InStr(Content, "[string]$TriggerConfigFile")
+        && InStr(Content, "function Write-Trace")
+    )
+}
+
+DownloadFileFromUrl(Url, FilePath)
+{
+    Http := ComObject("WinHttp.WinHttpRequest.5.1")
+    Http.Open("GET", Url, false)
+    Http.SetRequestHeader("User-Agent", "dogcake-proviewer-updater")
+    Http.SetRequestHeader("Accept", "application/octet-stream")
+    Http.SetTimeouts(5000, 5000, 15000, 15000)
+    Http.Send()
+
+    if (Http.Status != 200)
+        throw Error("HTTP 상태 코드 " . Http.Status)
+
+    Stream := ComObject("ADODB.Stream")
+    Stream.Type := 1
+    Stream.Open()
+    Stream.Write(Http.ResponseBody)
+    Stream.SaveToFile(FilePath, 2)
+    Stream.Close()
+}
+
+
+PowerShellQuote(Text)
+{
+    return "'" . StrReplace(Text, "'", "''") . "'"
+}
 
 
 ; ============================================================
@@ -443,6 +1172,7 @@ CheckLiveStatus()
 
     global BroadcastStart
     global LastStatus
+    global LastLiveStatusCheckTick
 
     global A_IconTip
 
@@ -509,13 +1239,15 @@ CheckLiveStatus()
             "application/json"
         )
 
+        http.SetTimeouts(3000, 3000, 5000, 5000)
         http.Send()
 
         if (http.Status != 200)
         {
             A_IconTip :=
-                "치지직 방송 감시 | API 오류"
+                "치지직 방송 감시 | API 오류 (자동 재시도 중)"
 
+            ScheduleLiveApiRetry()
             return
         }
 
@@ -544,11 +1276,18 @@ CheckLiveStatus()
         else
         {
             A_IconTip :=
-                "치지직 방송 감시 | 상태 확인 실패"
+                "치지직 방송 감시 | 상태 확인 실패 (자동 재시도 중)"
 
+            ScheduleLiveApiRetry()
             return
         }
 
+        ResetLiveApiRetry()
+        LastLiveStatusCheckTick := A_TickCount
+        RefreshLolGamePollingState(CurrentState)
+
+        CategoryId := GetJsonStringField(response, "liveCategory")
+        CategoryName := GetJsonStringField(response, "liveCategoryValue")
 
         ; ====================================================
         ; 방송 시작시간 추출
@@ -599,6 +1338,13 @@ CheckLiveStatus()
 
                 LastStatus :=
                     "OPEN"
+
+                TrackBroadcastCategory(
+                    "OPEN",
+                    BroadcastStart != "" ? BroadcastStart : ParsedDate,
+                    CategoryId,
+                    CategoryName
+                )
 
                 Run(
                     CHZZK_URL
@@ -772,6 +1518,13 @@ CheckLiveStatus()
             LastBroadcastEnd :=
                 A_Now
 
+            TrackBroadcastCategory(
+                "CLOSE",
+                BroadcastStart,
+                "",
+                ""
+            )
+
             BroadcastStart := ""
             LastStatus := "CLOSE"
 
@@ -916,6 +1669,16 @@ CheckLiveStatus()
         }
 
 
+        if (CurrentState = "OPEN")
+        {
+            TrackBroadcastCategory(
+                "OPEN",
+                BroadcastStart != "" ? BroadcastStart : ParsedDate,
+                CategoryId,
+                CategoryName
+            )
+        }
+
         PreviousState :=
             CurrentState
 
@@ -926,9 +1689,240 @@ CheckLiveStatus()
     catch
     {
         A_IconTip :=
-            "치지직 방송 감시 | API 연결 오류"
+            "치지직 방송 감시 | API 연결 오류 (자동 재시도 중)"
 
+        ScheduleLiveApiRetry()
         return
+    }
+}
+
+
+ScheduleLiveApiRetry()
+{
+    global LiveApiRetryDelay
+    global LiveApiRetryMaxDelay
+
+    SetTimer(CheckLiveStatus, -LiveApiRetryDelay)
+    LiveApiRetryDelay := Min(LiveApiRetryDelay * 2, LiveApiRetryMaxDelay)
+}
+
+
+ResetLiveApiRetry()
+{
+    global LiveApiRetryDelay
+    global CheckInterval
+
+    LiveApiRetryDelay := 5000
+    SetTimer(CheckLiveStatus, CheckInterval)
+}
+
+
+GetJsonStringField(Response, FieldName)
+{
+    Pattern :=
+        '"' . FieldName . '"\s*:\s*"((?:\\.|[^"\\])*)"'
+
+    if !RegExMatch(Response, Pattern, &Match)
+        return ""
+
+    Value := Match[1]
+    Value := StrReplace(Value, Chr(92) . Chr(92), Chr(92))
+    Value := StrReplace(Value, Chr(92) . Chr(34), Chr(34))
+    Value := StrReplace(Value, Chr(92) . "n", " ")
+    Value := StrReplace(Value, Chr(92) . "r", " ")
+    Value := StrReplace(Value, Chr(92) . "t", " ")
+
+    return Value
+}
+
+
+TrackBroadcastCategory(State, SessionStart, CategoryId, CategoryName)
+{
+    global ActiveCategorySession
+    global ActiveCategoryId
+    global ActiveCategoryName
+    global ActiveCategoryStart
+
+    if (State = "CLOSE")
+    {
+        FinalizeBroadcastCategory()
+        return
+    }
+
+    if (CategoryName = "")
+        CategoryName := "카테고리 미설정"
+
+    if (SessionStart = "")
+        SessionStart := A_Now
+
+    Now := A_Now
+
+    if (ActiveCategoryStart = "")
+    {
+        ActiveCategorySession := SessionStart
+        ActiveCategoryId := CategoryId
+        ActiveCategoryName := CategoryName
+        ActiveCategoryStart := Now
+
+        RecordCategoryTransition(
+            SessionStart,
+            Now,
+            "",
+            "",
+            CategoryId,
+            CategoryName,
+            ""
+        )
+        return
+    }
+
+    if (ActiveCategorySession != SessionStart)
+        FinalizeBroadcastCategory()
+
+    if (ActiveCategoryStart = "")
+    {
+        ActiveCategorySession := SessionStart
+        ActiveCategoryId := CategoryId
+        ActiveCategoryName := CategoryName
+        ActiveCategoryStart := Now
+
+        RecordCategoryTransition(
+            SessionStart,
+            Now,
+            "",
+            "",
+            CategoryId,
+            CategoryName,
+            ""
+        )
+        return
+    }
+
+    if (
+        ActiveCategoryId = CategoryId
+        && ActiveCategoryName = CategoryName
+    )
+        return
+
+    try
+    {
+        DurationSeconds := DateDiff(
+            Now,
+            ActiveCategoryStart,
+            "Seconds"
+        )
+    }
+    catch
+    {
+        DurationSeconds := 0
+    }
+
+    RecordCategoryTransition(
+        ActiveCategorySession,
+        Now,
+        ActiveCategoryId,
+        ActiveCategoryName,
+        CategoryId,
+        CategoryName,
+        DurationSeconds
+    )
+
+    ActiveCategorySession := SessionStart
+    ActiveCategoryId := CategoryId
+    ActiveCategoryName := CategoryName
+    ActiveCategoryStart := Now
+}
+
+
+FinalizeBroadcastCategory(ExitReason := "", ExitCode := 0)
+{
+    global ActiveCategorySession
+    global ActiveCategoryId
+    global ActiveCategoryName
+    global ActiveCategoryStart
+
+    if (ActiveCategoryStart = "")
+        return
+
+    Now := A_Now
+
+    try
+    {
+        DurationSeconds := DateDiff(
+            Now,
+            ActiveCategoryStart,
+            "Seconds"
+        )
+    }
+    catch
+    {
+        DurationSeconds := 0
+    }
+
+    RecordCategoryTransition(
+        ActiveCategorySession,
+        Now,
+        ActiveCategoryId,
+        ActiveCategoryName,
+        "",
+        "",
+        DurationSeconds
+    )
+
+    ActiveCategorySession := ""
+    ActiveCategoryId := ""
+    ActiveCategoryName := ""
+    ActiveCategoryStart := ""
+}
+
+
+RecordCategoryTransition(
+    SessionStart,
+    ChangeTime,
+    PreviousCategoryId,
+    PreviousCategoryName,
+    NewCategoryId,
+    NewCategoryName,
+    DurationSeconds
+)
+{
+    global CategoryHistoryFile
+
+    try
+    {
+        if !FileExist(CategoryHistoryFile)
+        {
+            FileAppend(
+                "방송시작,변경확인시각,이전카테고리ID,이전카테고리,새카테고리ID,새카테고리,이전카테고리시간(초),이전카테고리시간`r`n",
+                CategoryHistoryFile,
+                "UTF-8"
+            )
+        }
+
+        DurationText :=
+            DurationSeconds = ""
+            ? ""
+            : FormatElapsed(DurationSeconds)
+
+        Fields := [
+            FormatSessionDate(SessionStart),
+            FormatSessionDate(ChangeTime),
+            PreviousCategoryId,
+            PreviousCategoryName,
+            NewCategoryId,
+            NewCategoryName,
+            DurationSeconds,
+            DurationText
+        ]
+
+        FileAppend(
+            BuildCsvLine(Fields) . "`r`n",
+            CategoryHistoryFile,
+            "UTF-8"
+        )
+    }
+    catch
+    {
     }
 }
 
@@ -1080,43 +2074,70 @@ CreateStyledCheckbox(
     x,
     y,
     label,
-    initialValue
+    initialValue,
+    labelWidth := 360
 )
 {
     State := {
         Value: initialValue ? 1 : 0
     }
 
-    Box :=
+    Frame :=
         GuiObj.Add(
             "Text",
             "x" x
             . " y" y
             . " w20 h20"
+            . " Background009B70",
+            ""
+        )
+
+    Box :=
+        GuiObj.Add(
+            "Text",
+            "x" (x + 2)
+            . " y" (y + 2)
+            . " w16 h16"
             . " Background202733"
             . " c8B949E"
             . " Center 0x200",
             ""
         )
 
+    SquareCheckboxControls[Frame.Hwnd] := true
+    SquareCheckboxControls[Box.Hwnd] := true
+
+    static CleanupHandlerRegistered := false
+    if !CleanupHandlerRegistered
+    {
+        OnMessage(0x82, ForgetSquareCheckboxControl)
+        CleanupHandlerRegistered := true
+    }
+
     LabelControl :=
         GuiObj.Add(
             "Text",
             "x" (x + 28)
             . " y" (y - 1)
-            . " w360 h22"
+            . " w" labelWidth " h22"
             . " cD6DCE5",
             label
         )
 
     Check := {
         Box: Box,
+        Frame: Frame,
         Label: LabelControl,
         State: State,
         ExeName: label
     }
 
     Box.OnEvent(
+        "Click",
+        ToggleStyledCheckbox.Bind(Check)
+    )
+
+    Frame.OnEvent(
         "Click",
         ToggleStyledCheckbox.Bind(Check)
     )
@@ -1134,6 +2155,14 @@ CreateStyledCheckbox(
 }
 
 
+ForgetSquareCheckboxControl(wParam, lParam, msg, hwnd)
+{
+    global SquareCheckboxControls
+    if SquareCheckboxControls.Has(hwnd)
+        SquareCheckboxControls.Delete(hwnd)
+}
+
+
 ToggleStyledCheckbox(Check, *)
 {
     Check.State.Value :=
@@ -1142,6 +2171,7 @@ ToggleStyledCheckbox(Check, *)
     UpdateStyledCheckbox(
         Check
     )
+
 }
 
 
@@ -1169,6 +2199,444 @@ UpdateStyledCheckbox(Check)
 ; ============================================================
 ; 통합 설정 GUI
 ; ============================================================
+
+RegisterUserHotkeys()
+{
+    global HotkeyBindings
+    global DefaultHotkeys
+    global SettingsFile
+
+    desiredBindings := Map()
+    for action, binding in DefaultHotkeys
+    {
+        desiredBindings[action] := IniRead(
+            SettingsFile, "Hotkeys", action, binding
+        )
+    }
+
+    ; HotkeyBindings에는 실제 등록된 조합만 보관한다.
+    ; 설정 파일에서 읽은 값을 먼저 넣으면 아직 등록되지 않은 조합에
+    ; Off를 호출하게 되어 첫 실행 때 오류 복구 알림이 뜬다.
+    HotkeyBindings := Map()
+
+    try
+    {
+        ApplyUserHotkeys(desiredBindings)
+    }
+    catch
+    {
+        HotkeyBindings := Map()
+        ApplyUserHotkeys(DefaultHotkeys)
+        SaveSettings()
+        TrayTip("단축키 복구", "저장된 단축키에 오류가 있어 기본값으로 복구했습니다.", 1)
+    }
+}
+
+
+ApplyUserHotkeys(bindings)
+{
+    actions := Map(
+        "CancelShutdown", CancelShutdownHotkey,
+        "StopMonitor", StopMonitorHotkey,
+        "MonitorOff", MonitorOffHotkey,
+        "Settings", SettingsHotkey,
+        "TimelineMemo", TimelineMemoHotkey,
+        "TimelineViewer", TimelineViewerHotkey,
+        "LolRank", LolRankHotkey
+    )
+    seen := Map()
+    for action, binding in bindings
+    {
+        if (
+            binding = ""
+            || RegExMatch(binding, "^[#\^!+<>$~*]+$")
+            || seen.Has(StrLower(binding))
+        )
+            throw Error("비어 있거나 중복된 단축키입니다.")
+        seen[StrLower(binding)] := true
+    }
+
+    global HotkeyBindings
+    previous := HotkeyBindings.Clone()
+    try
+    {
+        for action, binding in previous
+            Hotkey(binding, "Off")
+        for action, binding in bindings
+            Hotkey(binding, actions[action], "On")
+        HotkeyBindings := bindings.Clone()
+    }
+    catch as err
+    {
+        for action, binding in bindings
+        {
+            try Hotkey(binding, "Off")
+        }
+        for action, binding in previous
+        {
+            try Hotkey(binding, actions[action], "On")
+        }
+        throw Error("단축키를 등록하지 못했습니다. 다른 프로그램과 충돌하는지 확인해주세요.",, err.Message)
+    }
+}
+
+
+SetUserHotkeysEnabled(enabled)
+{
+    global HotkeyBindings
+
+    for action, binding in HotkeyBindings
+    {
+        try
+            Hotkey(binding, enabled ? "On" : "Off")
+    }
+}
+
+
+CancelShutdownHotkey(*) => CancelShutdownReservation(true)
+
+StopMonitorHotkey(*)
+{
+    result := MsgBox("치지직 방송 감시를 종료할까요?", "방송 감시 종료", "YesNo Icon?")
+    if (result = "Yes")
+        ExitApp
+}
+
+MonitorOffHotkey(*)
+{
+    Sleep(2000)
+    SendMessage(0x112, 0xF170, 2, , "Program Manager")
+}
+
+SettingsHotkey(*) => ShowSettingsGui()
+TimelineMemoHotkey(*) => ShowTimelineMemo()
+TimelineViewerHotkey(*) => ShowTimelineViewer()
+LolRankHotkey(*) => ShowLolRankGui()
+
+
+ApplyAccentOutline(GuiObj, Control)
+{
+    Control.GetPos(&X, &Y, &Width, &Height)
+    Control.Opt("Background202733 c00D68F")
+    Control.SetFont("s9 Bold", "맑은 고딕")
+
+    AddRoundedOutlineControls(GuiObj, X, Y, Width, Height, "00D68F", 1, 6)
+}
+
+
+AddRoundedOutlineControls(GuiObj, X, Y, Width, Height, Color, Thickness := 1, Radius := 6)
+{
+    Controls := []
+    for Geometry in RoundedOutlineGeometry(X, Y, Width, Height, Thickness, Radius)
+    {
+        Controls.Push(GuiObj.Add(
+            "Text",
+            "x" Geometry[1] " y" Geometry[2]
+            . " w" Geometry[3] " h" Geometry[4]
+            . " Background" Color,
+            ""
+        ))
+    }
+    return Controls
+}
+
+
+RoundedOutlineGeometry(X, Y, Width, Height, Thickness := 1, Radius := 6)
+{
+    Radius := Min(Radius, Floor(Min(Width, Height) / 2))
+    CurveLength := Max(1, Radius - 2)
+    return [
+        [X + Radius, Y, Width - (Radius * 2), Thickness],
+        [X + Radius, Y + Height - Thickness, Width - (Radius * 2), Thickness],
+        [X, Y + Radius, Thickness, Height - (Radius * 2)],
+        [X + Width - Thickness, Y + Radius, Thickness, Height - (Radius * 2)],
+        [X + 2, Y + 1, CurveLength, Thickness],
+        [X + 1, Y + 2, Thickness, CurveLength],
+        [X + Width - Radius, Y + 1, CurveLength, Thickness],
+        [X + Width - 1 - Thickness, Y + 2, Thickness, CurveLength],
+        [X + 2, Y + Height - 1 - Thickness, CurveLength, Thickness],
+        [X + 1, Y + Height - Radius, Thickness, CurveLength],
+        [X + Width - Radius, Y + Height - 1 - Thickness, CurveLength, Thickness],
+        [X + Width - 1 - Thickness, Y + Height - Radius, Thickness, CurveLength]
+    ]
+}
+
+
+MoveRoundedOutlineControls(Controls, X, Y, Width, Height, Thickness := 1, Radius := 6)
+{
+    for Index, Geometry in RoundedOutlineGeometry(X, Y, Width, Height, Thickness, Radius)
+        Controls[Index].Move(Geometry[1], Geometry[2], Geometry[3], Geometry[4])
+}
+
+
+EnableRoundedGui(GuiObj, SkipCalendarDates := false)
+{
+    global TimelineCalendarState
+    global SquareCheckboxControls
+
+    try
+    {
+        Preference := Buffer(4, 0)
+        NumPut("Int", 2, Preference, 0) ; DWMWCP_ROUND
+        DllCall(
+            "dwmapi\DwmSetWindowAttribute",
+            "Ptr", GuiObj.Hwnd,
+            "UInt", 33, ; DWMWA_WINDOW_CORNER_PREFERENCE
+            "Ptr", Preference.Ptr,
+            "UInt", 4
+        )
+    }
+
+    try
+    {
+        ExcludedControls := Map()
+        for ControlHwnd in SquareCheckboxControls
+            ExcludedControls[ControlHwnd] := true
+        if (
+            SkipCalendarDates
+            && IsObject(TimelineCalendarState)
+            && GuiObj.Hwnd = TimelineCalendarState.Viewer.Hwnd
+        )
+        {
+            for _, CalendarCell in TimelineCalendarState.CalendarSlots
+                ExcludedControls[CalendarCell.Hwnd] := true
+        }
+
+        for ControlHwnd in WinGetControlsHwnd("ahk_id " . GuiObj.Hwnd)
+        {
+            if ExcludedControls.Has(ControlHwnd)
+            {
+                ; 이전에 적용된 둥근 영역도 제거해 날짜 칸을 항상 사각형으로 둔다.
+                DllCall("SetWindowRgn", "Ptr", ControlHwnd, "Ptr", 0, "Int", true)
+                continue
+            }
+
+            ClassNameBuffer := Buffer(512, 0)
+            if !DllCall(
+                "GetClassNameW",
+                "Ptr", ControlHwnd,
+                "Ptr", ClassNameBuffer.Ptr,
+                "Int", 256
+            )
+                continue
+
+            ClassName := StrGet(ClassNameBuffer, "UTF-16")
+            if (ClassName != "Static" && ClassName != "Edit")
+                continue
+
+            Rect := Buffer(16, 0)
+            if !DllCall("GetWindowRect", "Ptr", ControlHwnd, "Ptr", Rect.Ptr)
+                continue
+
+            Width := NumGet(Rect, 8, "Int") - NumGet(Rect, 0, "Int")
+            Height := NumGet(Rect, 12, "Int") - NumGet(Rect, 4, "Int")
+            if (Width < 6 || Height < 6)
+                continue
+
+            CornerDiameter := Min(18, Width, Height)
+            Region := DllCall(
+                "CreateRoundRectRgn",
+                "Int", 0, "Int", 0,
+                "Int", Width + 1, "Int", Height + 1,
+                "Int", CornerDiameter, "Int", CornerDiameter,
+                "Ptr"
+            )
+
+            if !DllCall("SetWindowRgn", "Ptr", ControlHwnd, "Ptr", Region, "Int", true)
+                DllCall("DeleteObject", "Ptr", Region)
+        }
+    }
+}
+
+
+ShowHotkeySettingsGui(*)
+{
+    global HotkeyBindings
+    global HotkeyLabels
+
+    ; 입력한 조합이 이 프로그램의 기존 전역 단축키를 실행하지 않도록 잠시 비활성화
+    SetUserHotkeysEnabled(false)
+
+    HotkeyGui := Gui("+AlwaysOnTop", "단축키 설정")
+    HotkeyGui.BackColor := "11151C"
+    HotkeyGui.SetFont("s9", "맑은 고딕")
+    HotkeyGui.Add("Text", "x20 y16 w300 h30 cFFFFFF", "단축키 설정")
+    HotkeyGui.SetFont("s9", "맑은 고딕")
+    HotkeyGui.Add("Text", "x22 y48 w400 h24 c8B949E", "각 항목을 선택한 뒤 원하는 키 조합을 눌러주세요.")
+
+    edits := Map()
+    winChecks := Map()
+    editBindings := Map()
+    y := 91
+    for action, label in HotkeyLabels
+    {
+        HotkeyGui.Add("Text", "x25 y" y " w150 h26 cD6DCE5 0x200", label)
+        winChecks[action] := CreateStyledCheckbox(
+            HotkeyGui,
+            175,
+            y + 3,
+            "Win",
+            InStr(HotkeyBindings[action], "#"),
+            38
+        )
+        baseBinding := StrReplace(HotkeyBindings[action], "#")
+        edits[action] := HotkeyGui.Add(
+            "Edit",
+            "x245 y" y " w190 h27 ReadOnly -Border Background202733 cFFFFFF",
+            FormatHotkeyForDisplay(baseBinding)
+        )
+        RemoveEditBorder(edits[action].Hwnd)
+        editBindings[action] := baseBinding
+        edits[action].OnEvent("Focus", BeginHotkeyCapture.Bind(action, edits, winChecks, editBindings))
+        y += 48
+    }
+    HotkeyGui.Add("Text", "x25 y" y " w410 h36 c8B949E", "Win 체크 후 키 조합을 누르면 Windows 키 조합으로 등록됩니다.")
+    y += 48
+    save := HotkeyGui.Add("Text", "x25 y" y " w195 h35 Background00D68F c11151C Center 0x200", "저장")
+    cancel := HotkeyGui.Add("Text", "x230 y" y " w205 h35 Background202733 cD6DCE5 Center 0x200", "취소")
+    save.OnEvent("Click", (*) => SaveHotkeySettings(HotkeyGui, edits, winChecks, editBindings))
+    cancel.OnEvent("Click", (*) => CloseHotkeySettingsGui(HotkeyGui))
+    HotkeyGui.OnEvent("Close", (*) => CloseHotkeySettingsGui(HotkeyGui))
+    winChecks["CancelShutdown"].Box.Focus()
+    HotkeyGui.Show("w460 h" (y + 58))
+    EnableRoundedGui(HotkeyGui)
+}
+
+
+FormatHotkeyForDisplay(binding)
+{
+    if (binding = "")
+        return "클릭하여 입력"
+
+    display := ""
+    if InStr(binding, "^")
+        display .= "Ctrl + "
+    if InStr(binding, "!")
+        display .= "Alt + "
+    if InStr(binding, "+")
+        display .= "Shift + "
+
+    keyName := RegExReplace(binding, "^[#\^!+]+")
+    if (StrUpper(keyName) = "SC01A")
+        keyName := "["
+    if (StrLen(keyName) = 1)
+        keyName := StrUpper(keyName)
+    return display . keyName
+}
+
+
+BeginHotkeyCapture(action, edits, winChecks, editBindings, *)
+{
+    global ActiveHotkeyInputHook
+
+    if IsObject(ActiveHotkeyInputHook)
+        ActiveHotkeyInputHook.Stop()
+
+    edits[action].Value := "키 입력 대기 중… (Esc 취소)"
+    hook := InputHook("L0")
+    hook.KeyOpt("{All}", "SN")
+    hook.OnKeyDown := CaptureUserHotkey.Bind(action, edits, winChecks, editBindings)
+    ActiveHotkeyInputHook := hook
+    hook.Start()
+}
+
+
+CaptureUserHotkey(action, edits, winChecks, editBindings, hook, vk, sc)
+{
+    global ActiveHotkeyInputHook
+
+    ; modifier 키만 눌린 동안은 계속 기다린다.
+    if (vk = 0x11 || vk = 0xA2 || vk = 0xA3
+        || vk = 0x10 || vk = 0xA0 || vk = 0xA1
+        || vk = 0x12 || vk = 0xA4 || vk = 0xA5
+        || vk = 0x5B || vk = 0x5C)
+        return
+
+    hook.Stop()
+    ActiveHotkeyInputHook := 0
+
+    if (vk = 0x1B)
+    {
+        edits[action].Value := FormatHotkeyForDisplay(editBindings[action])
+        winChecks[action].Box.Focus()
+        return
+    }
+
+    keyName := GetKeyName(Format("vk{:02X}sc{:03X}", vk, sc))
+    if (keyName = "")
+    {
+        edits[action].Value := FormatHotkeyForDisplay(editBindings[action])
+        winChecks[action].Box.Focus()
+        return
+    }
+
+    binding := ""
+    if GetKeyState("Ctrl", "P")
+        binding .= "^"
+    if GetKeyState("Alt", "P")
+        binding .= "!"
+    if GetKeyState("Shift", "P")
+        binding .= "+"
+    binding .= keyName
+
+    editBindings[action] := binding
+    if (GetKeyState("LWin", "P") || GetKeyState("RWin", "P"))
+    {
+        winChecks[action].State.Value := 1
+        UpdateStyledCheckbox(winChecks[action])
+    }
+    edits[action].Value := FormatHotkeyForDisplay(binding)
+    winChecks[action].Box.Focus()
+}
+
+
+CloseHotkeySettingsGui(guiObj)
+{
+    global ActiveHotkeyInputHook
+    if IsObject(ActiveHotkeyInputHook)
+    {
+        ActiveHotkeyInputHook.Stop()
+        ActiveHotkeyInputHook := 0
+    }
+    SetUserHotkeysEnabled(true)
+    try guiObj.Destroy()
+}
+
+
+SaveHotkeySettings(gui, edits, winChecks, editBindings)
+{
+    global ActiveHotkeyInputHook
+    global HotkeyBindings
+    global SettingsFile
+
+    if IsObject(ActiveHotkeyInputHook)
+    {
+        ActiveHotkeyInputHook.Stop()
+        ActiveHotkeyInputHook := 0
+    }
+
+    updated := Map()
+    for action, control in edits
+    {
+        binding := editBindings[action]
+        updated[action] := (winChecks[action].State.Value ? "#" : "") . binding
+    }
+    try
+    {
+        ApplyUserHotkeys(updated)
+        SetUserHotkeysEnabled(false)
+        for action, binding in updated
+            IniWrite(binding, SettingsFile, "Hotkeys", action)
+        gui.Destroy()
+        SetUserHotkeysEnabled(true)
+        TrayTip("단축키 저장 완료", "새 단축키를 적용했습니다.", 1)
+    }
+    catch as err
+    {
+        SetUserHotkeysEnabled(true)
+        MsgBox(err.Message, "단축키 설정 오류", "Icon!")
+    }
+}
 
 ShowSettingsGui()
 {
@@ -1213,7 +2681,7 @@ ShowSettingsGui()
 
     GuiObj.Add(
         "Text",
-        "x22 y47 w330 h22 c8B949E",
+        "x22 y47 w280 h22 c8B949E",
         "방송 종료 및 자동 실행 설정"
     )
 
@@ -1222,6 +2690,12 @@ ShowSettingsGui()
         "x375 y22 w80 h24 Center c00D68F",
         "● 실행 중"
     )
+
+    HotkeySettingsButton := GuiObj.Add(
+        "Text", "x315 y47 w130 h27 Background202733 cD6DCE5 Center 0x200", "단축키 설정"
+    )
+    ApplyAccentOutline(GuiObj, HotkeySettingsButton)
+    HotkeySettingsButton.OnEvent("Click", ShowHotkeySettingsGui)
 
     GuiObj.SetFont(
         "s11 Bold",
@@ -1496,6 +2970,8 @@ ShowSettingsGui()
             "프로그램 선택"
         )
 
+    ApplyAccentOutline(GuiObj, ProtectedButton)
+
     ClearButton :=
         GuiObj.Add(
             "Text",
@@ -1678,6 +3154,7 @@ ShowSettingsGui()
     GuiObj.Show(
         "w470 h695"
     )
+    EnableRoundedGui(GuiObj)
 }
 
 
@@ -1964,6 +3441,7 @@ ShowProtectedAppsGui(
     GuiObj.Show(
         "w470 h585"
     )
+    EnableRoundedGui(GuiObj)
 }
 
 
@@ -2823,6 +4301,8 @@ LoadSettings()
 SaveSettings()
 {
     global SettingsFile
+    global DefaultHotkeys
+    global HotkeyBindings
 
     global ShutdownEnabled
     global ShutdownMinutes
@@ -2888,6 +4368,14 @@ SaveSettings()
             "Settings",
             "YoutubeCooldownMinutes"
         )
+
+        for action, defaultBinding in DefaultHotkeys
+        {
+            binding := HotkeyBindings.Has(action)
+                ? HotkeyBindings[action]
+                : defaultBinding
+            IniWrite(binding, SettingsFile, "Hotkeys", action)
+        }
 
         return true
     }
@@ -3091,6 +4579,7 @@ StartChatMonitor()
     global ChatHelperPID
     global ChatQueueFile
     global ChatTriggerConfigFile
+    global ChatDebugLogFile
     global ChatHelperScript
 
     global ChannelID
@@ -3164,6 +4653,7 @@ StartChatMonitor()
             . ' -ChannelId "' ChannelID '"'
             . ' -TriggerFile "' ChatQueueFile '"'
             . ' -TriggerConfigFile "' ChatTriggerConfigFile '"'
+            . ' -LogFile "' ChatDebugLogFile '"'
 
         ChatHelperPID := 0
 
@@ -3229,46 +4719,35 @@ PollChatTrigger()
 {
     global ChatQueueFile
 
-    if !FileExist(
-        ChatQueueFile
-    )
+    if !FileExist(ChatQueueFile)
         return
 
     try
     {
-        content :=
-            FileRead(
-                ChatQueueFile,
-                "UTF-8"
-            )
+        content := FileRead(ChatQueueFile, "UTF-8")
+        FileDelete(ChatQueueFile)
+        lines := StrSplit(content, "`n", "`r")
+        LogYoutubeTrigger("QUEUE_READ lines=" . lines.Length)
 
-        FileDelete(
-            ChatQueueFile
-        )
-
-        for line in StrSplit(
-            content,
-            "`n",
-            "`r"
-        )
+        for line in lines
         {
-            line :=
-                Trim(line)
-
+            line := Trim(line)
             if (line = "")
                 continue
-
-            HandleChatMessage(
-                line
-            )
+            HandleChatMessage(line)
         }
     }
-    catch
+    catch as err
     {
+        LogYoutubeTrigger("QUEUE_ERROR " . err.Message)
     }
 }
 
-
+LogYoutubeTrigger(message)
+{
+    global ChatDebugLogFile
+    try FileAppend("[" . FormatTime(, "yyyy-MM-dd HH:mm:ss") . "] " . message . "`n", ChatDebugLogFile, "UTF-8")
+}
 ; ============================================================
 ; YouTube 채팅 트리거
 ; ============================================================
@@ -3283,25 +4762,33 @@ HandleChatMessage(
     global YoutubeCooldownUntil
 
     if !YoutubeEnabled
+    {
+        LogYoutubeTrigger("SKIP disabled")
         return
+    }
 
-    if (
-        message
-        !=
-        YoutubeTrigger
-    )
+    if !InStr(message, YoutubeTrigger)
+    {
+        LogYoutubeTrigger("SKIP no_match length=" . StrLen(message))
         return
+    }
 
-    if (
-        A_TickCount
-        <
-        YoutubeCooldownUntil
-    )
+    if (A_TickCount < YoutubeCooldownUntil)
+    {
+        LogYoutubeTrigger("SKIP cooldown")
         return
+    }
 
-    Run(
-        "https://www.youtube.com/"
-    )
+    try
+    {
+        Run("https://www.youtube.com/")
+        LogYoutubeTrigger("RUN_OK triggerLength=" . StrLen(YoutubeTrigger))
+    }
+    catch as err
+    {
+        LogYoutubeTrigger("RUN_ERROR " . err.Message)
+        return
+    }
 
     YoutubeCooldownUntil :=
         A_TickCount
@@ -3517,12 +5004,28 @@ CheckPendingVodMatches(ForceRun := false)
     ; 같은 방송 세션의 여러 타임라인은 VOD 목록을 공유한다.
     ; 세션별 VOD 후보 목록을 한 번만 조회한다.
     VodCache := Map()
+    SessionWindows := Map()
+
+    ; 각 세션에서 가장 늦은 타임라인까지 후보 검색 구간으로 사용한다.
+    for _, Row in Rows
+    {
+        SessionKey := NormalizeSessionDate(Row.SessionStart)
+        if (SessionKey = "")
+            continue
+
+        if (
+            !SessionWindows.Has(SessionKey)
+            || Row.ElapsedSeconds > SessionWindows[SessionKey]
+        )
+            SessionWindows[SessionKey] := Row.ElapsedSeconds
+    }
 
     for _, Row in Rows
     {
         SessionStart := Row.SessionStart
         ElapsedSeconds := Row.ElapsedSeconds
         TimeText := Row.TimeText
+        SessionKey := NormalizeSessionDate(SessionStart)
 
         ; 같은 세션이면 VOD API 검색 결과를 공유한다.
         ; 수동 실행이어도 미연결 행만 대상으로 한다.
@@ -3530,7 +5033,8 @@ CheckPendingVodMatches(ForceRun := false)
             SessionStart,
             ElapsedSeconds,
             VodCache,
-            false
+            false,
+            SessionWindows.Has(SessionKey) ? SessionWindows[SessionKey] : ElapsedSeconds
         )
 
         if !IsObject(Match)
@@ -3559,7 +5063,8 @@ CheckPendingVodMatches(ForceRun := false)
             SessionStart,
             TimeText,
             VodUrl,
-            false
+            false,
+            Match.VideoTitle
         )
         {
             ConnectedCount += 1
@@ -3624,6 +5129,8 @@ ReconnectPendingVodsManually(*)
     ; 수동 재연결도 미연결 VOD만 검사한다.
     ; 이미 연결된 링크는 건드리지 않는다.
     CheckPendingVodMatches(true)
+    ; 재연결 여부와 관계없이 기존 VOD 링크의 제목도 함께 보완한다.
+    BackfillTimelineVodTitles()
 }
 
 
@@ -3709,7 +5216,8 @@ ClearTimelineToolTip()
 ; 반환:
 ;   {
 ;       VideoNo: "...",
-;       CurrentTime: 123
+;       CurrentTime: 123,
+;       VideoTitle: "영상 제목"
 ;   }
 ; ============================================================
 
@@ -3717,7 +5225,8 @@ FindMatchingVod(
     TargetStart,
     ElapsedSeconds,
     CandidateCache := 0,
-    ForceRefresh := false
+    ForceRefresh := false,
+    CandidateWindowSeconds := 0
 )
 {
     global VIDEO_LIST_BASE_URL
@@ -3736,7 +5245,10 @@ FindMatchingVod(
     ; 같은 방송의 여러 타임라인을 검사할 때마다
     ; VOD 600개를 다시 조회하면 수백~수천 번의 HTTP 요청이 발생한다.
     ; 세션 단위로 후보 VOD 목록을 한 번만 만든다.
-    CacheKey := NormalizedTarget
+    if (CandidateWindowSeconds < ElapsedSeconds)
+        CandidateWindowSeconds := ElapsedSeconds
+
+    CacheKey := NormalizedTarget . "|" . CandidateWindowSeconds
 
     Candidates := ""
 
@@ -3748,7 +5260,10 @@ FindMatchingVod(
 
     if !IsObject(Candidates)
     {
-        Candidates := BuildVodCandidates(NormalizedTarget)
+        Candidates := BuildVodCandidates(
+            NormalizedTarget,
+            CandidateWindowSeconds
+        )
 
         if IsObject(CandidateCache)
             CandidateCache[CacheKey] := Candidates
@@ -3757,16 +5272,54 @@ FindMatchingVod(
     if !IsObject(Candidates) || Candidates.Length = 0
         return ""
 
-    ; 방송 전체 경과시간을 각 VOD 내부 시간으로 변환한다.
+    ; 후보는 방송 시작 근처와 각 VOD 분할 시작 시각의 두 형태를 허용한다.
+    ; 분할 VOD가 원래 liveOpenDate를 공유하면 누적 길이로 이어 붙인다.
     GroupElapsed := 0
+    HasAnchor := false
 
     for _, Candidate in Candidates
     {
         Duration := Candidate.Duration
+        try
+        {
+            StartOffset := DateDiff(
+                NormalizedTarget,
+                Candidate.LiveOpenDate,
+                "Seconds"
+            )
+        }
+        catch
+        {
+            continue
+        }
+
+        if !HasAnchor
+        {
+            if (Abs(StartOffset) > VodTimeTolerance)
+                continue
+
+            SegmentOffset := 0
+            HasAnchor := true
+        }
+        else if (Abs(StartOffset) <= VodTimeTolerance)
+        {
+            ; 분할편들이 방송 시작 시각을 공유하는 CHZZK 응답 형식
+            SegmentOffset := GroupElapsed
+        }
+        else if (Abs(StartOffset - GroupElapsed) <= VodTimeTolerance)
+        {
+            ; 분할편마다 실제 분할 시작 시각이 기록된 CHZZK 응답 형식
+            SegmentOffset := StartOffset
+        }
+        else
+        {
+            ; 다음 구간 시작이 앞 VOD 끝과 이어지지 않으면 다른 방송으로 간주
+            continue
+        }
 
         LocalTime :=
             ElapsedSeconds
-            - GroupElapsed
+            - SegmentOffset
 
         if (
             LocalTime >= 0
@@ -3775,11 +5328,15 @@ FindMatchingVod(
         {
             return {
                 VideoNo: Candidate.VideoNo,
-                CurrentTime: Floor(LocalTime)
+                CurrentTime: Floor(LocalTime),
+                VideoTitle: Candidate.VideoTitle
             }
         }
 
-        GroupElapsed += Duration
+        GroupElapsed := Max(
+            GroupElapsed,
+            SegmentOffset + Duration
+        )
     }
 
     return ""
@@ -3790,7 +5347,7 @@ FindMatchingVod(
 ; 방송 세션의 VOD 후보를 한 번만 조회
 ; ============================================================
 
-BuildVodCandidates(NormalizedTarget)
+BuildVodCandidates(NormalizedTarget, CandidateWindowSeconds := 0)
 {
     global VIDEO_LIST_BASE_URL
     global VodPageSize
@@ -3876,13 +5433,17 @@ BuildVodCandidates(NormalizedTarget)
                     continue
                 }
 
-                if (Abs(StartDifference) > VodTimeTolerance)
+                if (
+                    StartDifference < -VodTimeTolerance
+                    || StartDifference > CandidateWindowSeconds + VodTimeTolerance
+                )
                     continue
 
                 SeenVideoNos[VideoNo] := true
 
                 Candidates.Push({
                     VideoNo: VideoNo,
+                    VideoTitle: Info.VideoTitle,
                     LiveOpenDate: VodStart,
                     Duration: Duration,
                     PublishDate: Info.PublishDate,
@@ -3907,8 +5468,9 @@ BuildVodCandidates(NormalizedTarget)
 ; ============================================================
 ; VOD 후보 정렬
 ;
+; 서로 다른 liveOpenDate는 시간순으로 정렬한다.
 ; 같은 liveOpenDate를 가진 분할 VOD는 publishDate가 빠른 순서,
-; publishDate가 없으면 videoNo 오름차순으로 정렬한다.
+; publishDate가 같거나 없으면 videoNo 오름차순으로 정렬한다.
 ; ============================================================
 
 SortVodCandidates(Candidates)
@@ -3945,6 +5507,7 @@ SortVodCandidates(Candidates)
                 if (
                     Left.PublishDate != ""
                     && Right.PublishDate != ""
+                    && Left.PublishDate != Right.PublishDate
                 )
                 {
                     if (Left.PublishDate > Right.PublishDate)
@@ -4037,12 +5600,23 @@ GetVodInfo(
         Http.Open("GET", Url, false)
         Http.SetRequestHeader("User-Agent", "Mozilla/5.0")
         Http.SetRequestHeader("Accept", "application/json")
+        Http.SetTimeouts(3000, 3000, 5000, 5000)
         Http.Send()
 
         if (Http.Status != 200)
             return ""
 
-        ResponseText := Http.ResponseText
+        ; WinHTTP ResponseText가 UTF-8 제목을 시스템 코드페이지로 읽어
+        ; ì ë... 같은 문자열로 만들 수 있어 응답 바이트를 UTF-8로 직접 해석한다.
+        ResponseStream := ComObject("ADODB.Stream")
+        ResponseStream.Type := 1
+        ResponseStream.Open()
+        ResponseStream.Write(Http.ResponseBody)
+        ResponseStream.Position := 0
+        ResponseStream.Type := 2
+        ResponseStream.Charset := "utf-8"
+        ResponseText := ResponseStream.ReadText()
+        ResponseStream.Close()
 
         if !RegExMatch(
             ResponseText,
@@ -4078,10 +5652,13 @@ GetVodInfo(
                 ParseChzzkDate(PublishMatch[1])
         }
 
+        VideoTitle := GetJsonStringField(ResponseText, "videoTitle")
+
         return {
             LiveOpenDate: LiveOpenDate,
             Duration: Duration,
-            PublishDate: PublishDate
+            PublishDate: PublishDate,
+            VideoTitle: VideoTitle
         }
     }
     catch
@@ -4136,7 +5713,8 @@ UpdateTimelineVodLink(
     SessionStart,
     TimeText,
     VodUrl,
-    ForceReplace := false
+    ForceReplace := false,
+    VodTitle := ""
 )
 {
     global TimelineFile
@@ -4187,8 +5765,15 @@ UpdateTimelineVodLink(
                 Index = 1
             )
             {
+                HeaderFields := ParseCsvLine(Line)
+
+                if (HeaderFields.Length < 6)
+                    HeaderFields.Push("VOD제목")
+                else
+                    HeaderFields[6] := "VOD제목"
+
                 NewText :=
-                    Line
+                    BuildCsvLine(HeaderFields)
                     . "`r`n"
 
                 continue
@@ -4274,6 +5859,11 @@ UpdateTimelineVodLink(
 
             Fields[5] :=
                 VodUrl
+
+            if (Fields.Length < 6)
+                Fields.Push(VodTitle)
+            else
+                Fields[6] := VodTitle
 
             NewText :=
                 NewText
@@ -4375,7 +5965,7 @@ ShowTimelineMemo()
 
     MemoGui.SetFont(
         "s10",
-        "Segoe UI"
+        "맑은 고딕"
     )
 
     MemoGui.Add(
@@ -4459,6 +6049,7 @@ ShowTimelineMemo()
     MemoGui.Show(
         "w380 h245"
     )
+    EnableRoundedGui(MemoGui)
 
     MemoEdit.Focus()
 
@@ -4490,14 +6081,14 @@ ShowManualTimelineGui(EditMode := false, EditData := 0)
     {
         WindowTitle := "수동 타임라인 수정"
         HeaderTitle := "수동 타임라인 수정"
-        HeaderSubTitle := "기존 타임라인의 시간과 설명을 수정합니다. 링크는 고정됩니다."
+        HeaderSubTitle := "영상 시간과 설명을 수정합니다. 다시보기 링크는 고정됩니다."
         SaveButtonText := "타임라인 수정"
     }
     else
     {
         WindowTitle := "수동 타임라인 추가"
         HeaderTitle := "수동 타임라인 추가"
-        HeaderSubTitle := "다시보기를 보면서 원하는 장면을 타임라인에 직접 기록합니다."
+        HeaderSubTitle := "다시보기의 영상 위치와 설명을 타임라인에 직접 기록합니다."
         SaveButtonText := "타임라인 추가"
     }
 
@@ -4567,6 +6158,8 @@ ShowManualTimelineGui(EditMode := false, EditData := 0)
             EditMode ? "고정 링크" : "날짜 확인"
         )
     LoadButton.SetFont("s9 Bold")
+    if !EditMode
+        ApplyAccentOutline(GuiObj, LoadButton)
 
     LinkStatus :=
         GuiObj.Add(
@@ -4603,7 +6196,7 @@ ShowManualTimelineGui(EditMode := false, EditData := 0)
     GuiObj.Add(
         "Text",
         "x22 y275 w400 h25 cFFFFFF",
-        "방송 시간"
+        "영상 시간"
     )
 
     GuiObj.SetFont("s9", "맑은 고딕")
@@ -4764,6 +6357,7 @@ ShowManualTimelineGui(EditMode := false, EditData := 0)
     GuiObj.OnEvent("Close", (*) => GuiObj.Destroy())
 
     GuiObj.Show("w470 h555")
+    EnableRoundedGui(GuiObj)
     LinkEdit.Focus()
 }
 
@@ -4885,6 +6479,134 @@ GetVideoNoFromUrl(Url)
     }
 
     return ""
+}
+
+
+BackfillTimelineVodTitles(*)
+{
+    global TimelineFile
+    global TimelineCalendarState
+
+    if !FileExist(TimelineFile)
+    {
+        TrayTip("기존 VOD 제목", "타임라인 파일이 없습니다.", 1)
+        return
+    }
+
+    try
+    {
+        Text := FileRead(TimelineFile, "UTF-8")
+        Lines := StrSplit(Text, "`n")
+        TitleCache := Map()
+        UpdatedCount := 0
+        Changed := false
+
+        for Index, Line in Lines
+        {
+            Line := StrReplace(Line, "`r", "")
+
+            if (Line = "")
+                continue
+
+            Fields := ParseCsvLine(Line)
+
+            if (Index = 1)
+            {
+                if (Fields.Length < 6)
+                {
+                    Fields.Push("VOD제목")
+                    Changed := true
+                }
+                else if (Fields[6] != "VOD제목")
+                {
+                    Fields[6] := "VOD제목"
+                    Changed := true
+                }
+
+                Lines[Index] := BuildCsvLine(Fields)
+                continue
+            }
+
+            if (Fields.Length < 5)
+                continue
+
+            ExistingTitle := Fields.Length >= 6 ? Trim(Fields[6]) : ""
+            if (ExistingTitle != "" && !IsLikelyMojibake(ExistingTitle))
+                continue
+
+            VideoNo := GetVideoNoFromUrl(Fields[5])
+
+            if (VideoNo = "")
+                continue
+
+            if !TitleCache.Has(VideoNo)
+            {
+                ToolTip("기존 VOD 제목 조회 중...`n" . VideoNo)
+                Info := GetVodInfo(VideoNo)
+                TitleCache[VideoNo] := IsObject(Info) ? Info.VideoTitle : ""
+            }
+
+            VideoTitle := TitleCache[VideoNo]
+
+            if (VideoTitle = "")
+                continue
+
+            if (VideoTitle = ExistingTitle)
+                continue
+
+            if (Fields.Length < 6)
+                Fields.Push(VideoTitle)
+            else
+                Fields[6] := VideoTitle
+
+            Lines[Index] := BuildCsvLine(Fields)
+            UpdatedCount += 1
+            Changed := true
+        }
+
+        ToolTip()
+
+        if !Changed
+        {
+            TrayTip("기존 VOD 제목", "추가할 제목이 없습니다.", 1)
+            return
+        }
+
+        if !BackupTimelineCsv("before_vod_title_backfill", true)
+            throw Error("수정 전 타임라인 CSV 백업을 만들지 못했습니다.")
+
+        RewriteTimelineFile(Lines)
+
+        try
+        {
+            if IsObject(TimelineCalendarState)
+            {
+                LoadTimelineViewerList()
+                RenderTimelineCalendar()
+            }
+        }
+        catch
+        {
+        }
+
+        TrayTip(
+            "기존 VOD 제목",
+            UpdatedCount . "개 타임라인의 VOD 제목을 보완했습니다.",
+            1
+        )
+    }
+    catch as Err
+    {
+        ToolTip()
+        TrayTip("기존 VOD 제목", "제목을 채우지 못했습니다: " . Err.Message, 1)
+    }
+}
+
+
+IsLikelyMojibake(Text)
+{
+    return RegExMatch(Text, "[ÃÂìëíê]")
+        || RegExMatch(Text, "[\x{0080}-\x{009F}]")
 }
 
 
@@ -5029,7 +6751,8 @@ SaveManualTimeline(
                 TimeText,
                 Memo,
                 OriginalRecordTime,
-                BuildChzzkTimestampUrl(OriginalVodUrl, ElapsedSec)
+                BuildChzzkTimestampUrl(OriginalVodUrl, ElapsedSec),
+                OriginalFields.Length >= 6 ? OriginalFields[6] : ""
             )
 
             Lines[FileLine] := UpdatedLine
@@ -5076,7 +6799,7 @@ SaveManualTimeline(
         try
         {
             FileAppend(
-                "방송시작,방송시간,메모,기록시각,VOD링크`r`n",
+                "방송시작,방송시간,메모,기록시각,VOD링크,VOD제목`r`n",
                 TimelineFile,
                 "UTF-8"
             )
@@ -5164,7 +6887,7 @@ SaveManualTimeline(
 ; 타임라인 CSV 한 줄 생성
 ; ============================================================
 
-BuildTimelineCsvLine(SessionStart, TimeText, Memo, RecordTime, VodUrl)
+BuildTimelineCsvLine(SessionStart, TimeText, Memo, RecordTime, VodUrl, VodTitle := "")
 {
     Quote := Chr(34)
     Memo := StrReplace(Memo, "`r", " ")
@@ -5175,7 +6898,8 @@ BuildTimelineCsvLine(SessionStart, TimeText, Memo, RecordTime, VodUrl)
         . Quote . StrReplace(TimeText, Quote, Quote . Quote) . Quote . ","
         . Quote . StrReplace(Memo, Quote, Quote . Quote) . Quote . ","
         . Quote . StrReplace(RecordTime, Quote, Quote . Quote) . Quote . ","
-        . Quote . StrReplace(VodUrl, Quote, Quote . Quote) . Quote . "`r`n"
+        . Quote . StrReplace(VodUrl, Quote, Quote . Quote) . Quote . ","
+        . Quote . StrReplace(VodTitle, Quote, Quote . Quote) . Quote . "`r`n"
     )
 }
 
@@ -5183,7 +6907,7 @@ BuildTimelineCsvLine(SessionStart, TimeText, Memo, RecordTime, VodUrl)
 ; ============================================================
 ; 타임라인 CSV 백업
 ;
-; 기본: A_ScriptDir\timeline_backup\
+; 기본: data\timeline_backup\
 ; 최대 100개 유지
 ; 실제 CSV 변경이 발생하기 직전에만 백업
 ; 수동 추가/수정/삭제는 강제 백업
@@ -5228,7 +6952,8 @@ BackupTimelineCsv(Reason := "auto", Force := false)
         Loop Files, TimelineBackupDir "\*.csv", "F"
             Files.Push(A_LoopFileFullPath)
 
-        Files.Sort()
+        ; Loop Files returns names in sorted order. Backup names start with a
+        ; timestamp, so the first item is the oldest backup to remove.
 
         while (Files.Length > TimelineBackupMaxCount)
         {
@@ -5373,7 +7098,7 @@ SaveTimeline(
         try
         {
             FileAppend(
-                "방송시작,방송시간,메모,기록시각,VOD링크`r`n",
+                "방송시작,방송시간,메모,기록시각,VOD링크,VOD제목`r`n",
                 TimelineFile,
                 "UTF-8"
             )
@@ -5409,6 +7134,10 @@ SaveTimeline(
         . ","
         . Quote
         . RecordTime
+        . Quote
+        . ","
+        . Quote
+        . ""
         . Quote
         . ","
         . Quote
@@ -5625,71 +7354,92 @@ ShowTimelineViewer()
 
     Viewer := Gui("+Resize MinSize700x650", "🔖 치지직 타임라인")
     Viewer.BackColor := "11151C"
-    Viewer.SetFont("s10", "Segoe UI")
+    Viewer.SetFont("s10", "맑은 고딕")
 
-    Viewer.Add("Text", "x20 y18 w430 c00D68F", "치지직 타임라인")
-    Viewer.Add("Text", "x20 y45 w650 c8B949E", "방송 시작 날짜를 기준으로 정리합니다. 자정을 넘어간 방송도 시작한 날짜에 귀속됩니다.")
+    Viewer.Add("Text", "x20 y28 w430 c00D68F", "치지직 타임라인")
+    Viewer.Add("Text", "x20 y65 w650 c8B949E", "방송 시작 날짜를 기준으로 정리합니다. 자정을 넘어간 방송도 시작한 날짜에 귀속됩니다.")
 
     ; 이전 달 / 다음 달 버튼
     ; Windows 기본 흰색 Button 대신 어두운 커스텀 UI를 사용한다.
     ; 상단 날짜 이동 버튼
     ManualButton := Viewer.Add(
         "Text",
-        "x365 y15 w105 h30 Background202733 cD6DCE5 Center 0x200",
+        "x365 y25 w105 h30 Background202733 cD6DCE5 Center 0x200",
         "+ 수동 타임라인"
     )
     ManualButton.SetFont("s9 Bold")
+    ApplyAccentOutline(Viewer, ManualButton)
 
     PrevButton := Viewer.Add(
         "Text",
-        "x485 y15 w40 h30 Background202733 cD6DCE5 Center 0x200",
+        "x485 y25 w40 h30 Background202733 cD6DCE5 Center 0x200",
         "<"
     )
     PrevButton.SetFont("s12 Bold")
+    ApplyAccentOutline(Viewer, PrevButton)
+    PrevButton.SetFont("s12 Bold", "맑은 고딕")
 
     ; 오늘 버튼은 초록색
     TodayButton := Viewer.Add(
         "Text",
-        "x535 y15 w65 h30 Background00D68F c11151C Center 0x200",
+        "x535 y25 w65 h30 Background00D68F c11151C Center 0x200",
         "오늘"
     )
     TodayButton.SetFont("s9 Bold")
 
     NextButton := Viewer.Add(
         "Text",
-        "x610 y15 w40 h30 Background202733 cD6DCE5 Center 0x200",
+        "x610 y25 w40 h30 Background202733 cD6DCE5 Center 0x200",
         ">"
     )
     NextButton.SetFont("s12 Bold")
+    ApplyAccentOutline(Viewer, NextButton)
+    NextButton.SetFont("s12 Bold", "맑은 고딕")
 
     TimelineCalendarState := {
         Viewer: Viewer,
         Month: "",
         SelectedDate: "",
-        MonthText: Viewer.Add("Text", "x20 y92 w665 h30 cFFFFFF Center 0x200", ""),
+        MonthText: Viewer.Add("Text", "x20 y102 w665 h30 cFFFFFF Center 0x200", ""),
         DayControls: Map(),
         WeekControls: [],
         CalendarSlots: [],
+        SelectionFrame: [],
         List: 0,
-        SummaryText: 0
+        StatusImageList: 0,
+        SummaryText: 0,
+        SearchEdit: 0,
+        HoverRow: -2
     }
     TimelineCalendarState.MonthText.SetFont("s12 Bold")
 
-    LatestDate := GetLatestTimelineDate()
-    if (LatestDate = "")
-        LatestDate := FormatTime(A_Now, "yyyy-MM-dd")
+    LatestDate := FormatTime(A_Now, "yyyy-MM-dd")
 
     TimelineCalendarState.SelectedDate := LatestDate
     TimelineCalendarState.Month := SubStr(LatestDate, 1, 7)
 
-    TimelineCalendarState.SummaryText := Viewer.Add("Text", "x20 y395 w665 h25 c8B949E", "")
+    TimelineCalendarState.SummaryText := Viewer.Add("Text", "x20 y405 w240 h25 c8B949E", "")
     TimelineCalendarState.SummaryText.SetFont("s10 Bold")
 
-    List := Viewer.Add("ListView", "x20 y430 w665 h155 -Hdr -HScroll -Border -E0x200 Background11151C cD6DCE5", ["방송 시작", "방송 시간", "메모", "상태"])
+    TimelineCalendarState.SearchEdit := Viewer.Add(
+        "Edit",
+        "x330 y404 w355 h27 -Border -E0x200 Background202733 cFFFFFF"
+    )
+    TimelineCalendarState.SearchEdit.SetFont("s9", "맑은 고딕")
+    Viewer.Add(
+        "Text",
+        "x270 y409 w55 h20 c8B949E Right",
+        "검색"
+    )
+
+    List := Viewer.Add("ListView", "x20 y440 w665 h155 -Hdr -HScroll -Border -E0x200 Background11151C cD6DCE5", ["방송 시작", "영상 시간", "메모", "VOD 영상", "연결"])
+    TimelineCalendarState.StatusImageList := 0
     List.ModifyCol(1, 145)
-    List.ModifyCol(2, 85)
-    List.ModifyCol(3, 330)
-    List.ModifyCol(4, 100)
+    List.ModifyCol(2, 75)
+    List.ModifyCol(3, 225)
+    List.ModifyCol(4, 185)
+    List.ModifyCol(5, 25)
+    OnMessage(0x4E, TimelineListCustomDraw)
     DllCall("uxtheme\SetWindowTheme", "Ptr", List.Hwnd, "Str", " ", "Str", " ")
     SendMessage(0x1001, 0, 0x1C1511, List.Hwnd)
     SendMessage(0x1024, 0, 0xE5DCD6, List.Hwnd)
@@ -5699,37 +7449,47 @@ ShowTimelineViewer()
 
     EditButton := Viewer.Add(
         "Text",
-        "x20 y595 w105 h30 Background202733 cD6DCE5 Center 0x200",
+        "x20 y605 w105 h30 Background202733 cD6DCE5 Center 0x200",
         "수정"
     )
     EditButton.SetFont("s9 Bold")
 
     DeleteButton := Viewer.Add(
         "Text",
-        "x135 y595 w105 h30 Background202733 cFF6B6B Center 0x200",
+        "x135 y605 w105 h30 Background202733 cFF6B6B Center 0x200",
         "삭제"
     )
     DeleteButton.SetFont("s9 Bold")
 
     ReconnectButton := Viewer.Add(
         "Text",
-        "x250 y595 w135 h30 Background202733 cD6DCE5 Center 0x200",
+        "x250 y605 w135 h30 Background202733 cD6DCE5 Center 0x200",
         "↻ VOD 재연결"
     )
-    ReconnectButton.SetFont("s9 Bold")
+    ApplyAccentOutline(Viewer, ReconnectButton)
+
+    ChapterButton := Viewer.Add(
+        "Text",
+        "x400 y605 w135 h30 Background202733 cD6DCE5 Center 0x200",
+        "챕터 생성"
+    )
+    ApplyAccentOutline(Viewer, ChapterButton)
 
     EditButton.OnEvent("Click", EditSelectedTimeline.Bind(List))
     DeleteButton.OnEvent("Click", DeleteSelectedTimeline.Bind(List))
     ReconnectButton.OnEvent("Click", ReconnectPendingVodsManually)
+    ChapterButton.OnEvent("Click", GenerateSelectedVodChapters.Bind(List))
     List.OnEvent("DoubleClick", OpenSelectedTimeline.Bind(List))
     ManualButton.OnEvent("Click", (*) => ShowManualTimelineGui())
     PrevButton.OnEvent("Click", (*) => ChangeTimelineMonth(-1))
     NextButton.OnEvent("Click", (*) => ChangeTimelineMonth(1))
     TodayButton.OnEvent("Click", (*) => SelectTimelineToday())
-    Viewer.OnEvent("Close", (*) => Viewer.Destroy())
+    TimelineCalendarState.SearchEdit.OnEvent("Change", (*) => LoadTimelineViewerList())
+    Viewer.OnEvent("Close", CloseTimelineViewer)
 
     ; 반드시 창을 먼저 표시한 뒤 날짜 컨트롤을 생성한다.
-    Viewer.Show("w705 h640")
+    Viewer.Show("w705 h650")
+    SetTimer(UpdateTimelineHoverTip, 100)
 
     RenderTimelineCalendar()
     LoadTimelineViewerList()
@@ -5802,7 +7562,7 @@ RenderTimelineCalendar()
     CellW := 95
     CellH := 39
     StartX := 20
-    StartY := 125
+    StartY := 135
 
     ; --------------------------------------------------------
     ; 달력 컨트롤은 최초 1회만 만든다.
@@ -5850,6 +7610,21 @@ RenderTimelineCalendar()
 
             TimelineCalendarState.CalendarSlots.Push(Ctrl)
         }
+
+        ; 선택 날짜에 사용할 둥근 초록 테두리를 만든다.
+        FrameControls := AddRoundedOutlineControls(
+            Viewer,
+            StartX,
+            StartY + 28,
+            CellW - 3,
+            CellH - 3,
+            "00D68F",
+            1,
+            6
+        )
+        for _, FrameControl in FrameControls
+            FrameControl.Visible := false
+        TimelineCalendarState.SelectionFrame := FrameControls
     }
 
     DatesWithTimeline := GetTimelineDateMap()
@@ -5915,8 +7690,9 @@ RenderTimelineCalendar()
 
         if IsSelected
         {
-            Ctrl.Opt("Background00D68F c11151C")
-            Ctrl.SetFont("s10 Bold")
+            ; 선택 날짜는 기존 바탕을 유지하고 글자색과 테두리만 강조한다.
+            Ctrl.Opt("Background202733 c00D68F")
+            Ctrl.SetFont("s10 Bold", "맑은 고딕")
         }
         else
         {
@@ -5933,6 +7709,29 @@ RenderTimelineCalendar()
 
         TimelineCalendarState.DayControls[DateKey] := Ctrl
     }
+
+    ; 선택 날짜 둘레에만 1px 초록 테두리를 표시한다.
+    for _, FrameEdge in TimelineCalendarState.SelectionFrame
+        FrameEdge.Visible := false
+
+    if TimelineCalendarState.DayControls.Has(TimelineCalendarState.SelectedDate)
+    {
+        SelectedCell := TimelineCalendarState.DayControls[TimelineCalendarState.SelectedDate]
+        SelectedCell.GetPos(&CellX, &CellY, &CellW, &CellH)
+        MoveRoundedOutlineControls(
+            TimelineCalendarState.SelectionFrame,
+            CellX,
+            CellY,
+            CellW,
+            CellH,
+            1,
+            6
+        )
+        for _, FrameControl in TimelineCalendarState.SelectionFrame
+            FrameControl.Visible := true
+    }
+
+    EnableRoundedGui(Viewer, true)
 }
 
 
@@ -6246,6 +8045,8 @@ LoadTimelineViewerList()
     global TimelineFile
     global TimelineViewerLinks
     global TimelineViewerRows
+    global TimelineViewerHoverInfo
+    global TimelineViewerStatusColors
     global TimelineCalendarState
 
     List := TimelineCalendarState.List
@@ -6256,9 +8057,16 @@ LoadTimelineViewerList()
     List.Delete()
     TimelineViewerLinks := Map()
     TimelineViewerRows := Map()
+    TimelineViewerHoverInfo := Map()
+    TimelineViewerStatusColors := Map()
+    TimelineCalendarState.HoverRow := -2
 
     SelectedDate :=
         TimelineCalendarState.SelectedDate
+
+    SearchQuery := ""
+    if IsObject(TimelineCalendarState.SearchEdit)
+        SearchQuery := Trim(TimelineCalendarState.SearchEdit.Value)
 
     if (SelectedDate = "")
         return
@@ -6268,8 +8076,10 @@ LoadTimelineViewerList()
 
     if !FileExist(TimelineFile)
     {
-        TimelineCalendarState.SummaryText.Text :=
-            SelectedDate . "  ·  기록 없음"
+        if (SearchQuery != "")
+            TimelineCalendarState.SummaryText.Text := "검색 결과 없음"
+        else
+            TimelineCalendarState.SummaryText.Text := SelectedDate . "  ·  기록 없음"
         return
     }
 
@@ -6297,42 +8107,610 @@ LoadTimelineViewerList()
             TimeText := Trim(Fields[2])
             Memo := Fields[3]
             VodUrl := Trim(Fields[5])
+            VideoTitle := Fields.Length >= 6 ? Fields[6] : ""
 
             DateKey := GetTimelineDateKey(SessionStart)
 
-            if (DateKey != SelectedDate)
-                continue
+            if (SearchQuery = "")
+            {
+                if (DateKey != SelectedDate)
+                    continue
+            }
+            else
+            {
+                SearchTarget :=
+                    SessionStart . " "
+                    . TimeText . " "
+                    . Memo . " "
+                    . VodUrl . " "
+                    . VideoTitle
+
+                MatchesSearch := true
+                for _, Term in StrSplit(SearchQuery, " ")
+                {
+                    Term := Trim(Term)
+                    if (Term != "" && !InStr(SearchTarget, Term))
+                    {
+                        MatchesSearch := false
+                        break
+                    }
+                }
+
+                if !MatchesSearch
+                    continue
+            }
 
             Count += 1
 
-            Status :=
-                VodUrl != ""
-                ? "▶ 다시보기"
-                : "⚠ VOD 확인 필요"
+            VodDisplay := VideoTitle != "" ? VideoTitle : (VodUrl != "" ? "다시보기" : "VOD 확인 필요")
+            if VodUrl != ""
+                VodDisplay := "◀ " . VodDisplay
 
             List.Add(
                 "",
                 SessionStart,
                 TimeText,
                 Memo,
-                Status
+                VodDisplay,
+                "●"
             )
+            TimelineViewerStatusColors[Count - 1] := VodUrl != "" ? 0x0060C840 : 0x004444F0
 
             TimelineViewerLinks[Count] := VodUrl
             TimelineViewerRows[Count] := Index
+            TimelineViewerHoverInfo[Count] := {
+                SessionStart: SessionStart,
+                ElapsedSeconds: ParseElapsedTime(TimeText),
+                VideoTitle: VideoTitle
+            }
         }
     }
     catch
     {
     }
 
-    TimelineCalendarState.SummaryText.Text :=
-        SelectedDate
-        . "  ·  타임라인 "
-        . Count
-        . "개"
+    if (SearchQuery != "")
+    {
+        TimelineCalendarState.SummaryText.Text :=
+            "검색 결과 " . Count . "개"
+    }
+    else
+    {
+        TimelineCalendarState.SummaryText.Text :=
+            SelectedDate
+            . "  ·  타임라인 "
+            . Count
+            . "개"
+    }
 
     List.Redraw()
+}
+
+
+GenerateSelectedVodChapters(List, *)
+{
+    global TimelineViewerLinks
+
+    RowNumber := List.GetNext(0)
+    if (RowNumber <= 0)
+    {
+        MsgBox("먼저 챕터를 만들 VOD의 타임라인을 선택하세요.", "챕터 생성", "Iconi")
+        return
+    }
+
+    if !TimelineViewerLinks.Has(RowNumber) || TimelineViewerLinks[RowNumber] = ""
+    {
+        MsgBox("선택한 타임라인은 아직 VOD에 연결되지 않았습니다.", "챕터 생성", "Iconi")
+        return
+    }
+
+    SessionStart := List.GetText(RowNumber, 1)
+    VodUrl := TimelineViewerLinks[RowNumber]
+    VideoTitle := StrReplace(List.GetText(RowNumber, 4), "◀ ", "")
+
+    if !RegExMatch(VodUrl, "/video/(\d+)", &VideoMatch)
+    {
+        MsgBox("선택한 VOD 링크에서 영상 번호를 찾지 못했습니다.", "챕터 생성", "Icon!")
+        return
+    }
+
+    VideoId := VideoMatch[1]
+    ChapterText := BuildVodChapterText(SessionStart, VideoId, VideoTitle)
+    if (ChapterText = "")
+    {
+        MsgBox("VOD 챕터를 만들 기록을 찾지 못했습니다.", "챕터 생성", "Iconi")
+        return
+    }
+
+    ShowVodChapterPreview(VideoTitle, ChapterText)
+}
+
+
+BuildVodChapterText(SessionStart, TargetVideoId, VideoTitle := "")
+{
+    global TimelineFile
+    global CategoryHistoryFile
+
+    SessionKey := NormalizeSessionDate(SessionStart)
+    if (SessionKey = "" || !FileExist(TimelineFile))
+        return ""
+
+    TimelineRows := []
+    SegmentStarts := Map()
+
+    try
+    {
+        Lines := StrSplit(FileRead(TimelineFile, "UTF-8"), "`n")
+        for Index, Line in Lines
+        {
+            if (Index = 1)
+                continue
+
+            Line := StrReplace(Line, "`r", "")
+            if (Line = "")
+                continue
+
+            Fields := ParseCsvLine(Line)
+            if (Fields.Length < 5 || NormalizeSessionDate(Fields[1]) != SessionKey)
+                continue
+
+            ElapsedSeconds := ParseElapsedTime(Trim(Fields[2]))
+            if (ElapsedSeconds < 0)
+                continue
+
+            VodUrl := Trim(Fields[5])
+            RowVideoId := ""
+            VodSeconds := -1
+            if (
+                VodUrl != ""
+                && RegExMatch(VodUrl, "/video/(\d+)", &VideoMatch)
+                && RegExMatch(VodUrl, "(?:\?|&)currentTime=(\d+)", &TimeMatch)
+            )
+            {
+                RowVideoId := VideoMatch[1]
+                VodSeconds := Integer(TimeMatch[1])
+                SegmentStart := ElapsedSeconds - VodSeconds
+                if !SegmentStarts.Has(RowVideoId) || SegmentStart < SegmentStarts[RowVideoId]
+                    SegmentStarts[RowVideoId] := SegmentStart
+            }
+
+            RowTitle := Fields.Length >= 6 ? Trim(Fields[6]) : ""
+            if (RowVideoId = TargetVideoId && VideoTitle = "" && RowTitle != "")
+                VideoTitle := RowTitle
+
+            TimelineRows.Push({
+                Elapsed: ElapsedSeconds,
+                Memo: Trim(Fields[3]),
+                VideoId: RowVideoId
+            })
+        }
+    }
+    catch
+    {
+        return ""
+    }
+
+    if !SegmentStarts.Has(TargetVideoId)
+        return ""
+
+    SegmentStart := SegmentStarts[TargetVideoId]
+    SegmentEnd := 2147483647
+    for VideoId, OtherStart in SegmentStarts
+    {
+        if (VideoId != TargetVideoId && OtherStart > SegmentStart && OtherStart < SegmentEnd)
+            SegmentEnd := OtherStart
+    }
+
+    if (VideoTitle = "" || VideoTitle = "다시보기")
+        VideoTitle := "VOD " . TargetVideoId
+
+    ChapterEvents := []
+    CategoryAtStart := ""
+    if FileExist(CategoryHistoryFile)
+    {
+        try
+        {
+            CategoryLines := StrSplit(FileRead(CategoryHistoryFile, "UTF-8"), "`n")
+            for Index, Line in CategoryLines
+            {
+                if (Index = 1)
+                    continue
+
+                Line := StrReplace(Line, "`r", "")
+                if (Line = "")
+                    continue
+
+                Fields := ParseCsvLine(Line)
+                if (Fields.Length < 6 || NormalizeSessionDate(Fields[1]) != SessionKey)
+                    continue
+
+                ChangeKey := NormalizeSessionDate(Fields[2])
+                CategoryName := Trim(Fields[6])
+                if (ChangeKey = "" || CategoryName = "")
+                    continue
+
+                ChangeElapsed := DateDiff(ChangeKey, SessionKey, "Seconds")
+                if (ChangeElapsed <= SegmentStart)
+                {
+                    CategoryAtStart := CategoryName
+                    continue
+                }
+
+                if (ChangeElapsed >= SegmentEnd)
+                    continue
+
+                ChapterEvents.Push({
+                    Seconds: ChangeElapsed - SegmentStart,
+                    Label: "카테고리: " . CategoryName
+                })
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    for _, Row in TimelineRows
+    {
+        if (Row.Elapsed < SegmentStart || Row.Elapsed >= SegmentEnd)
+            continue
+        if (Row.VideoId != "" && Row.VideoId != TargetVideoId)
+            continue
+
+        LocalSeconds := Row.Elapsed - SegmentStart
+        if (LocalSeconds <= 0)
+            continue
+
+        Label := Row.Memo != "" ? Row.Memo : "타임라인"
+        Label := StrReplace(StrReplace(Label, "`r", " "), "`n", " ")
+        ChapterEvents.Push({Seconds: LocalSeconds, Label: Label})
+    }
+
+    ; Sort events by VOD time using insertion sort.
+    Index := 2
+    while (Index <= ChapterEvents.Length)
+    {
+        Current := ChapterEvents[Index]
+        CompareIndex := Index - 1
+        while (CompareIndex >= 1 && ChapterEvents[CompareIndex].Seconds > Current.Seconds)
+        {
+            ChapterEvents[CompareIndex + 1] := ChapterEvents[CompareIndex]
+            CompareIndex -= 1
+        }
+        ChapterEvents[CompareIndex + 1] := Current
+        Index += 1
+    }
+
+    StartLabel := CategoryAtStart != "" ? "카테고리: " . CategoryAtStart : "방송 시작"
+    Chapters := [{Seconds: 0, Label: StartLabel}]
+    for _, Event in ChapterEvents
+    {
+        if (Event.Seconds < 0)
+            continue
+
+        LastChapter := Chapters[Chapters.Length]
+        if (Event.Seconds - LastChapter.Seconds < 10)
+        {
+            if !InStr(LastChapter.Label, Event.Label)
+                LastChapter.Label .= " · " . Event.Label
+            continue
+        }
+
+        Chapters.Push({Seconds: Event.Seconds, Label: Event.Label})
+    }
+
+    Output := ""
+    for _, Chapter in Chapters
+        Output .= FormatVodChapterTime(Chapter.Seconds) . " " . Chapter.Label . "`r`n"
+
+    return RTrim(Output, "`r`n")
+}
+
+
+FormatVodChapterTime(Seconds)
+{
+    Seconds := Max(0, Floor(Seconds))
+    Hours := Floor(Seconds / 3600)
+    Minutes := Floor(Mod(Seconds, 3600) / 60)
+    RemainingSeconds := Mod(Seconds, 60)
+
+    if (Hours > 0)
+        return Format("{:02}:{:02}:{:02}", Hours, Minutes, RemainingSeconds)
+
+    return Format("{:02}:{:02}", Minutes, RemainingSeconds)
+}
+
+
+ShowVodChapterPreview(VideoTitle, ChapterText)
+{
+    ChapterGui := Gui("+AlwaysOnTop", "VOD 챕터 생성")
+    ChapterGui.BackColor := "11151C"
+    ChapterGui.SetFont("s9", "맑은 고딕")
+    ChapterGui.Add("Text", "x20 y18 w550 h22 c00D68F", "VOD 챕터")
+    ChapterGui.Add("Text", "x20 y44 w550 h22 c8B949E", VideoTitle . " · 내용을 확인한 뒤 복사하세요.")
+
+    ChapterEdit := ChapterGui.Add(
+        "Edit",
+        "x20 y75 w550 h235 Multi -Wrap Background202733 cFFFFFF",
+        ChapterText
+    )
+    ChapterEdit.SetFont("s10", "맑은 고딕")
+    ChapterGui.Add("Text", "x20 y312 w550 h16 c8B949E", "유튜브 챕터는 00:00 시작, 10초 이상 간격, 3개 이상이어야 인식됩니다.")
+
+    CopyButton := ChapterGui.Add(
+        "Text",
+        "x20 y330 w135 h30 Background202733 cD6DCE5 Center 0x200",
+        "클립보드 복사"
+    )
+    ApplyAccentOutline(ChapterGui, CopyButton)
+
+    CloseButton := ChapterGui.Add(
+        "Text",
+        "x435 y330 w135 h30 Background202733 cD6DCE5 Center 0x200",
+        "닫기"
+    )
+    CloseButton.SetFont("s9 Bold")
+    CopyButton.OnEvent("Click", CopyVodChapterText.Bind(ChapterEdit))
+    CloseButton.OnEvent("Click", CloseVodChapterPreview.Bind(ChapterGui))
+    ChapterGui.Show("w590 h385")
+}
+
+
+CopyVodChapterText(EditControl, *)
+{
+    A_Clipboard := EditControl.Value
+    ClipWait(1)
+    ToolTip("VOD 챕터를 클립보드에 복사했습니다.")
+    SetTimer(ClearTimelineToolTip, -2000)
+}
+
+
+CloseVodChapterPreview(GuiObj, *)
+{
+    GuiObj.Destroy()
+}
+
+TimelineListCustomDraw(wParam, lParam, msg, hwnd)
+{
+    global TimelineCalendarState
+    global TimelineViewerStatusColors
+
+    try
+    {
+        List := TimelineCalendarState.List
+        if (!List || NumGet(lParam, 0, "Ptr") != List.Hwnd)
+            return
+
+        DrawStageOffset := A_PtrSize * 3
+        DrawStage := NumGet(lParam, DrawStageOffset, "UInt")
+        if (DrawStage = 0x00000001) ; CDDS_PREPAINT
+            return 0x00000020 ; CDRF_NOTIFYITEMDRAW
+        if (DrawStage = 0x00010001) ; CDDS_ITEMPREPAINT
+            return 0x00000020 ; CDRF_NOTIFYSUBITEMDRAW
+        if (DrawStage != 0x00030001) ; CDDS_ITEMPREPAINT | CDDS_SUBITEM
+            return
+
+        ItemOffset := A_PtrSize = 8 ? 56 : 36
+        ColorOffset := A_PtrSize = 8 ? 80 : 48
+        SubItemOffset := A_PtrSize = 8 ? 88 : 56
+        ItemIndex := NumGet(lParam, ItemOffset, "UPtr")
+        SubItemIndex := NumGet(lParam, SubItemOffset, "Int")
+        if (SubItemIndex != 4 || !TimelineViewerStatusColors.Has(ItemIndex))
+            return
+
+        NumPut("UInt", TimelineViewerStatusColors[ItemIndex], lParam, ColorOffset)
+        return 0x00000002 ; CDRF_NEWFONT: apply the custom status-circle color
+    }
+}
+
+
+
+CreateVodStatusImageList()
+{
+    ImageList := IL_Create(2)
+    if !ImageList
+        return 0
+
+    MaskColor := 0x00FF00FF
+    GreenBitmap := CreateStatusCircleBitmap(0x0060C840, MaskColor, true)
+    RedBitmap := CreateStatusCircleBitmap(0x004444F0, MaskColor)
+
+    if GreenBitmap
+    {
+        DllCall("Comctl32\ImageList_AddMasked", "Ptr", ImageList, "Ptr", GreenBitmap, "UInt", MaskColor, "Int")
+        DllCall("Gdi32\DeleteObject", "Ptr", GreenBitmap)
+    }
+
+    if RedBitmap
+    {
+        DllCall("Comctl32\ImageList_AddMasked", "Ptr", ImageList, "Ptr", RedBitmap, "UInt", MaskColor, "Int")
+        DllCall("Gdi32\DeleteObject", "Ptr", RedBitmap)
+    }
+
+    return ImageList
+}
+
+
+CreateStatusCircleBitmap(CircleColor, MaskColor, IncludeArrow := false)
+{
+    IconWidth := DllCall("GetSystemMetrics", "Int", 49, "Int")
+    IconHeight := DllCall("GetSystemMetrics", "Int", 50, "Int")
+    if (IconWidth < 8 || IconHeight < 8)
+        return 0
+
+    ScreenDC := DllCall("GetDC", "Ptr", 0, "Ptr")
+    if !ScreenDC
+        return 0
+
+    MemoryDC := DllCall("Gdi32\CreateCompatibleDC", "Ptr", ScreenDC, "Ptr")
+    Bitmap := DllCall("Gdi32\CreateCompatibleBitmap", "Ptr", ScreenDC, "Int", IconWidth, "Int", IconHeight, "Ptr")
+    if (!MemoryDC || !Bitmap)
+    {
+        if MemoryDC
+            DllCall("Gdi32\DeleteDC", "Ptr", MemoryDC)
+        if Bitmap
+            DllCall("Gdi32\DeleteObject", "Ptr", Bitmap)
+        DllCall("ReleaseDC", "Ptr", 0, "Ptr", ScreenDC)
+        return 0
+    }
+
+    PreviousBitmap := DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", Bitmap, "Ptr")
+    BackgroundBrush := DllCall("Gdi32\CreateSolidBrush", "UInt", MaskColor, "Ptr")
+    CircleBrush := DllCall("Gdi32\CreateSolidBrush", "UInt", CircleColor, "Ptr")
+    NullPen := DllCall("Gdi32\GetStockObject", "Int", 8, "Ptr")
+    Rect := Buffer(16, 0)
+    NumPut("Int", 0, Rect, 0)
+    NumPut("Int", 0, Rect, 4)
+    NumPut("Int", IconWidth, Rect, 8)
+    NumPut("Int", IconHeight, Rect, 12)
+
+    DllCall("User32\FillRect", "Ptr", MemoryDC, "Ptr", Rect.Ptr, "Ptr", BackgroundBrush)
+    PreviousBrush := DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", CircleBrush, "Ptr")
+    PreviousPen := DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", NullPen, "Ptr")
+    if IncludeArrow
+    {
+        ArrowPoints := Buffer(24, 0)
+        NumPut("Int", 1, ArrowPoints, 0)
+        NumPut("Int", 3, ArrowPoints, 4)
+        NumPut("Int", IconWidth - 9, ArrowPoints, 8)
+        NumPut("Int", Floor(IconHeight / 2), ArrowPoints, 12)
+        NumPut("Int", 1, ArrowPoints, 16)
+        NumPut("Int", IconHeight - 3, ArrowPoints, 20)
+        DllCall("Gdi32\Polygon", "Ptr", MemoryDC, "Ptr", ArrowPoints.Ptr, "Int", 3)
+        DllCall("Gdi32\Ellipse", "Ptr", MemoryDC, "Int", IconWidth - 8, "Int", 3, "Int", IconWidth - 2, "Int", IconHeight - 3)
+    }
+    else
+        DllCall("Gdi32\Ellipse", "Ptr", MemoryDC, "Int", 3, "Int", 3, "Int", IconWidth - 3, "Int", IconHeight - 3)
+
+    DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", PreviousPen)
+    DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", PreviousBrush)
+    DllCall("Gdi32\SelectObject", "Ptr", MemoryDC, "Ptr", PreviousBitmap)
+    DllCall("Gdi32\DeleteObject", "Ptr", CircleBrush)
+    DllCall("Gdi32\DeleteObject", "Ptr", BackgroundBrush)
+    DllCall("Gdi32\DeleteDC", "Ptr", MemoryDC)
+    DllCall("ReleaseDC", "Ptr", 0, "Ptr", ScreenDC)
+
+    return Bitmap
+}
+
+
+UpdateTimelineHoverTip()
+{
+    global TimelineCalendarState
+    global TimelineViewerHoverInfo
+
+    try
+    {
+        List := TimelineCalendarState.List
+        if !List
+            return
+
+        CursorPoint := Buffer(8, 0)
+        if !DllCall("GetCursorPos", "Ptr", CursorPoint.Ptr)
+            return
+
+        if !DllCall("ScreenToClient", "Ptr", List.Hwnd, "Ptr", CursorPoint.Ptr)
+        {
+            if (TimelineCalendarState.HoverRow != -1)
+                ToolTip()
+            TimelineCalendarState.HoverRow := -1
+            return
+        }
+
+        HitInfo := Buffer(24, 0)
+        NumPut("Int", NumGet(CursorPoint, 0, "Int"), HitInfo, 0)
+        NumPut("Int", NumGet(CursorPoint, 4, "Int"), HitInfo, 4)
+        HitRow := SendMessage(0x1012, 0, HitInfo.Ptr, List.Hwnd)
+
+        if (HitRow < 0)
+        {
+            if (TimelineCalendarState.HoverRow != -1)
+                ToolTip()
+            TimelineCalendarState.HoverRow := -1
+            return
+        }
+
+        RowNumber := HitRow + 1
+        if (TimelineCalendarState.HoverRow = RowNumber)
+            return
+
+        TimelineCalendarState.HoverRow := RowNumber
+        if !TimelineViewerHoverInfo.Has(RowNumber)
+            return
+
+        HoverInfo := TimelineViewerHoverInfo[RowNumber]
+        CategoryName := GetTimelineCategoryAtTime(
+            HoverInfo.SessionStart,
+            HoverInfo.ElapsedSeconds
+        )
+
+        TipText :=
+            "게임/카테고리: "
+            . (CategoryName != "" ? CategoryName : "기록 없음")
+
+        if (HoverInfo.VideoTitle != "")
+            TipText .= "`nVOD: " . HoverInfo.VideoTitle
+
+        MouseGetPos(&MouseX, &MouseY)
+        ToolTip(TipText, MouseX + 18, MouseY + 18)
+    }
+    catch
+    {
+    }
+}
+
+
+GetTimelineCategoryAtTime(SessionStart, ElapsedSeconds)
+{
+    global CategoryHistoryFile
+
+    if !FileExist(CategoryHistoryFile)
+        return ""
+
+    SessionKey := NormalizeSessionDate(SessionStart)
+    if (SessionKey = "" || ElapsedSeconds < 0)
+        return ""
+
+    try
+    {
+        TargetTime := DateAdd(SessionKey, ElapsedSeconds, "Seconds")
+        Lines := StrSplit(FileRead(CategoryHistoryFile, "UTF-8"), "`n")
+        CategoryName := ""
+
+        for Index, Line in Lines
+        {
+            if (Index = 1 || Trim(Line) = "")
+                continue
+
+            Fields := ParseCsvLine(StrReplace(Line, "`r", ""))
+            if (Fields.Length < 6)
+                continue
+
+            if (NormalizeSessionDate(Fields[1]) != SessionKey)
+                continue
+
+            ChangeTime := NormalizeSessionDate(Fields[2])
+            if (ChangeTime = "" || ChangeTime > TargetTime)
+                continue
+
+            if (Fields[6] != "")
+                CategoryName := Fields[6]
+        }
+
+        return CategoryName
+    }
+    catch
+    {
+        return ""
+    }
+}
+
+
+CloseTimelineViewer(GuiObj, *)
+{
+    SetTimer(UpdateTimelineHoverTip, 0)
+    ToolTip()
+    GuiObj.Destroy()
 }
 
 
@@ -6887,3 +9265,702 @@ EditSubclassProc(
         "Ptr"
     )
 }
+
+
+; ============================================================
+; LoL 솔로랭크 조회
+; ============================================================
+
+ShowLolRankGui(*)
+{
+    global LolRankGuiObj
+    global LolRankRiotIdEdit
+    global LolRankStatusText
+    global LolRankNameText
+    global LolRankRankText
+    global LolRankRecordText
+    global LolRankRateText
+    global LolRankSettingsFile
+    global LolGameStatusText
+    global LolGameNotifyCheckbox
+
+    LolRankSettingsFile := A_ScriptDir "\data\lol_rank.ini"
+
+    if IsObject(LolRankGuiObj)
+    {
+        try
+        {
+            if WinExist("ahk_id " . LolRankGuiObj.Hwnd)
+            {
+                WinActivate("ahk_id " . LolRankGuiObj.Hwnd)
+                return
+            }
+        }
+    }
+
+    RiotId := IniRead(
+        LolRankSettingsFile,
+        "LoL",
+        "LastRiotId",
+        "롤불구자#119"
+    )
+
+    LolRankGuiObj := Gui("+AlwaysOnTop", "LoL 랭크 조회")
+    LolRankGuiObj.BackColor := "11151C"
+    LolRankGuiObj.SetFont("s9", "맑은 고딕")
+
+    LolRankGuiObj.SetFont("s16 Bold", "맑은 고딕")
+    LolRankGuiObj.Add("Text", "x22 y18 w340 h30 cFFFFFF", "LoL 솔로랭크 조회")
+
+    LolRankGuiObj.SetFont("s9", "맑은 고딕")
+    LolRankGuiObj.Add("Text", "x24 y57 w420 h22 c8B949E", "Riot ID  (게임이름#태그)")
+
+    LolRankRiotIdEdit := LolRankGuiObj.Add(
+        "Edit",
+        "x22 y82 w315 h31 Background202733 cFFFFFF",
+        RiotId
+    )
+    RemoveEditBorder(LolRankRiotIdEdit.Hwnd)
+
+    LookupButton := LolRankGuiObj.Add(
+        "Text",
+        "x347 y81 w105 h33 Background202733 c00D68F Center 0x200",
+        "조회"
+    )
+    ApplyAccentOutline(LolRankGuiObj, LookupButton)
+    LookupButton.OnEvent(
+        "Click",
+        StartLolRankLookup.Bind(LolRankGuiObj, LolRankRiotIdEdit)
+    )
+
+    LolRankGuiObj.Add("Text", "x22 y129 w430 h1 Background303844", "")
+    LolRankGuiObj.Add("Text", "x24 y146 w420 h22 c8B949E", "솔로랭크")
+
+    LolRankNameText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y176 w420 h26 cFFFFFF",
+        "Riot ID를 입력하고 조회를 눌러주세요."
+    )
+    LolRankRankText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y208 w420 h38 c00D68F",
+        ""
+    )
+    LolRankRecordText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y253 w420 h25 cD6DCE5",
+        ""
+    )
+    LolRankRateText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y280 w420 h25 cD6DCE5",
+        ""
+    )
+    LolRankGuiObj.Add("Text", "x22 y316 w430 h1 Background303844", "")
+    LolRankGuiObj.SetFont("s10 Bold", "맑은 고딕")
+    LolGameStatusText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y329 w428 h27 c8B949E",
+        "연결 상태 확인 중..."
+    )
+    LolGameNotifyEnabled := IniRead(
+        LolRankSettingsFile,
+        "LoL",
+        "MatchUpdateNotificationEnabled",
+        IniRead(
+            LolRankSettingsFile,
+            "LoL",
+            "GameStartNotificationEnabled",
+            IniRead(LolRankSettingsFile, "LoL", "GameDetectionEnabled", "1")
+        )
+    ) = "1"
+    LolGameNotifyCheckbox := CreateStyledCheckbox(
+        LolRankGuiObj,
+        24,
+        357,
+        "전적 갱신 알림",
+        LolGameNotifyEnabled,
+        150
+    )
+    LolGameNotifyCheckbox.Box.OnEvent("Click", LolGameNotificationToggled)
+    LolGameNotifyCheckbox.Frame.OnEvent("Click", LolGameNotificationToggled)
+    LolGameNotifyCheckbox.Label.OnEvent("Click", LolGameNotificationToggled)
+    LolRankGuiObj.SetFont("s9", "맑은 고딕")
+    LolRankGuiObj.Add("Text", "x190 y357 w262 h20 c8B949E", "완료된 솔로랭크 기록 알림")
+    LolRankGuiObj.Add("Text", "x22 y383 w430 h1 Background303844", "")
+    LolRankStatusText := LolRankGuiObj.Add(
+        "Text",
+        "x24 y391 w428 h34 c8B949E",
+        ""
+    )
+
+    LolRankGuiObj.OnEvent("Close", CloseLolRankGui)
+    LolRankGuiObj.Show("w475 h445")
+    EnableRoundedGui(LolRankGuiObj)
+    RefreshLolGamePollingState()
+}
+
+
+LolGameNotificationToggled(*)
+{
+    global LolGameNotifyCheckbox
+    global LolRankSettingsFile
+
+    Enabled := LolGameNotifyCheckbox.State.Value = 1
+    try IniWrite(Enabled ? "1" : "0", LolRankSettingsFile, "LoL", "MatchUpdateNotificationEnabled")
+    RefreshLolGamePollingState()
+}
+
+
+IsLolGamePollingAllowed(BroadcastState := "")
+{
+    global LolRankSettingsFile
+    global LastStatus
+    global LastLiveStatusCheckTick
+    global CheckInterval
+
+    if (BroadcastState = "")
+        BroadcastState := LastStatus
+
+    NotifyEnabled := IniRead(
+        LolRankSettingsFile,
+        "LoL",
+        "MatchUpdateNotificationEnabled",
+        IniRead(
+            LolRankSettingsFile,
+            "LoL",
+            "GameStartNotificationEnabled",
+            IniRead(LolRankSettingsFile, "LoL", "GameDetectionEnabled", "1")
+        )
+    ) = "1"
+
+    return (
+        NotifyEnabled
+        && BroadcastState = "CLOSE"
+        && LastLiveStatusCheckTick > 0
+        && A_TickCount - LastLiveStatusCheckTick <= CheckInterval * 2
+    )
+}
+
+
+RefreshLolGamePollingState(BroadcastState := "")
+{
+    global LolGameStatusText
+
+    if IsLolGamePollingAllowed(BroadcastState)
+    {
+        StartLolMatchPush()
+        return
+    }
+
+    StopLolMatchPush()
+    if IsObject(LolGameStatusText)
+        LolGameStatusText.Text := "⏸ 방송 중 또는 알림 꺼짐 · 연결 중지"
+}
+
+
+StartLolMatchPush()
+{
+    global LolWorkerBaseUrl
+    global LolMatchPushPID
+    global LolMatchEventDirectory
+    global ChatHelperScript
+    global ChannelID
+    global ChatQueueFile
+    global ChatTriggerConfigFile
+    global ChatDebugLogFile
+    global LolGameStatusText
+
+    if !IsLolGamePollingAllowed()
+    {
+        return
+    }
+
+    if (LolWorkerBaseUrl = "")
+    {
+        if IsObject(LolGameStatusText)
+            LolGameStatusText.Text := "⚠ Worker 주소 미설정"
+        return
+    }
+    if (LolMatchPushPID && ProcessExist(LolMatchPushPID))
+        return
+    LolMatchPushPID := 0
+    if !FileExist(ChatHelperScript)
+    {
+        if IsObject(LolGameStatusText)
+            LolGameStatusText.Text := "⚠ chzzk_chat.ps1 파일을 찾을 수 없습니다"
+        return
+    }
+
+    try
+    {
+        DirCreate(LolMatchEventDirectory)
+        PowerShellPath := A_WinDir . "\System32\WindowsPowerShell\v1.0\powershell.exe"
+        command := '"' . PowerShellPath . '" -NoProfile -ExecutionPolicy Bypass'
+            . ' -File ' . UpdaterQuote(ChatHelperScript)
+            . ' -ChannelId ' . UpdaterQuote(ChannelID)
+            . ' -TriggerFile ' . UpdaterQuote(ChatQueueFile)
+            . ' -TriggerConfigFile ' . UpdaterQuote(ChatTriggerConfigFile)
+            . ' -LogFile ' . UpdaterQuote(ChatDebugLogFile)
+            . ' -LolMatchPushMode'
+            . ' -WorkerUrl ' . UpdaterQuote(Trim(LolWorkerBaseUrl))
+            . ' -EventDirectory ' . UpdaterQuote(LolMatchEventDirectory)
+        Run(command, A_ScriptDir, "Hide", &LolMatchPushPID)
+        if IsObject(LolGameStatusText)
+            LolGameStatusText.Text := "연결 중..."
+    }
+    catch
+    {
+        LolMatchPushPID := 0
+        if IsObject(LolGameStatusText)
+            LolGameStatusText.Text := "⚠ WebSocket helper 실행 실패"
+    }
+}
+
+
+StopLolMatchPush(*)
+{
+    global LolMatchPushPID
+    global LolMatchEventDirectory
+    global LolGameStatusText
+
+    if LolMatchPushPID
+    {
+        try
+        {
+            if ProcessExist(LolMatchPushPID)
+                ProcessClose(LolMatchPushPID)
+        }
+        catch
+        {
+        }
+        LolMatchPushPID := 0
+    }
+    try FileDelete(LolMatchEventDirectory . "\connected.flag")
+    ClearLolMatchEvents()
+}
+
+
+EnsureLolMatchPushConnection()
+{
+    global LolMatchPushPID
+    global LolMatchPushRestartTick
+    global LolMatchEventDirectory
+    global LolGameStatusText
+
+    if !IsLolGamePollingAllowed()
+    {
+        StopLolMatchPush()
+        return
+    }
+
+    if (LolMatchPushPID && ProcessExist(LolMatchPushPID))
+    {
+        if FileExist(LolMatchEventDirectory . "\connected.flag")
+        {
+            if IsObject(LolGameStatusText)
+                LolGameStatusText.Text := "🟢 전적 알림 서버 연결됨"
+        }
+        else if IsObject(LolGameStatusText)
+            LolGameStatusText.Text := "연결 중..."
+        return
+    }
+
+    LolMatchPushPID := 0
+    if (A_TickCount - LolMatchPushRestartTick < 5000)
+        return
+    LolMatchPushRestartTick := A_TickCount
+    StartLolMatchPush()
+}
+
+
+PollLolMatchPushEvents()
+{
+    global LolMatchEventDirectory
+    global LolRankSettingsFile
+
+    if !DirExist(LolMatchEventDirectory)
+        return
+
+    MatchCount := 0
+    WinCount := 0
+    LossCount := 0
+    RemakeCount := 0
+    MatchDetails := ""
+
+    Loop Files, LolMatchEventDirectory . "\*.event", "F"
+    {
+        EventFile := A_LoopFileFullPath
+        try EventText := FileRead(EventFile, "UTF-8")
+        catch
+        {
+            try FileDelete(EventFile)
+            continue
+        }
+        try FileDelete(EventFile)
+
+        if !IsLolGamePollingAllowed()
+            return
+        if !RegExMatch(EventText, '"type"\s*:\s*"match_completed"')
+            continue
+        MatchId := RegExReplace(A_LoopFileName, "\.event$")
+        if !RegExMatch(MatchId, "^[A-Za-z0-9_-]+$")
+            continue
+
+        Result := GetJsonStringField(EventText, "result")
+        Champion := GetJsonStringField(EventText, "champion")
+        if (Result != "win" && Result != "loss" && Result != "remake")
+            continue
+
+        SettingKey := "NotifiedMatch_" . MatchId
+        if (IniRead(LolRankSettingsFile, "LoL", SettingKey, "0") = "1")
+            continue
+        try IniWrite("1", LolRankSettingsFile, "LoL", SettingKey)
+
+        MatchCount += 1
+        if RegExMatch(EventText, '"kills"\s*:\s*(\d+)', &KillsMatch)
+            MatchKills := Integer(KillsMatch[1])
+        else
+            MatchKills := 0
+        if RegExMatch(EventText, '"deaths"\s*:\s*(\d+)', &DeathsMatch)
+            MatchDeaths := Integer(DeathsMatch[1])
+        else
+            MatchDeaths := 0
+        if RegExMatch(EventText, '"assists"\s*:\s*(\d+)', &AssistsMatch)
+            MatchAssists := Integer(AssistsMatch[1])
+        else
+            MatchAssists := 0
+
+        if (Result = "win")
+        {
+            WinCount += 1
+            ResultLabel := "승"
+        }
+        else if (Result = "loss")
+        {
+            LossCount += 1
+            ResultLabel := "패"
+        }
+        else
+        {
+            RemakeCount += 1
+            ResultLabel := "다시하기"
+        }
+
+        MatchDetails .= (MatchDetails = "" ? "" : "`n")
+            . "챔피언 [" . (Champion = "" ? "정보 없음" : Champion) . "] KDA ["
+            . MatchKills . "/" . MatchDeaths . "/" . MatchAssists . "] " . ResultLabel
+    }
+
+    if (MatchCount = 0)
+        return
+
+    Summary := MatchCount . "판의 게임 감지!`n"
+        . "결과 " . WinCount . "승 / " . LossCount . "패 / " . RemakeCount . "다시하기`n"
+        . MatchDetails
+    TrayTip("솔로랭크 전적 갱신", Summary, 1)
+}
+
+
+ClearLolMatchEvents()
+{
+    global LolMatchEventDirectory
+    if !DirExist(LolMatchEventDirectory)
+        return
+    Loop Files, LolMatchEventDirectory . "\*.event", "F"
+        try FileDelete(A_LoopFileFullPath)
+}
+
+
+StartLolRankLookup(GuiObj, RiotIdEdit, *)
+{
+    global LolWorkerBaseUrl
+    global LolRankSettingsFile
+    global LolRankCooldownSeconds
+    global LolRankLastRequestTick
+    global LolRankHttp
+    global LolRankRequestStartedTick
+    global LolRankStatusText
+    global LolRankNameText
+    global LolRankRankText
+    global LolRankRecordText
+    global LolRankRateText
+
+    RiotId := Trim(RiotIdEdit.Value)
+    SeparatorPos := InStr(RiotId, "#")
+    if !SeparatorPos || InStr(RiotId, "#", false, SeparatorPos + 1)
+    {
+        LolRankStatusText.Text := "Riot ID를 게임이름#태그 형식으로 입력해주세요."
+        return
+    }
+
+    GameName := Trim(SubStr(RiotId, 1, SeparatorPos - 1))
+    TagLine := Trim(SubStr(RiotId, SeparatorPos + 1))
+    if (GameName = "" || TagLine = "")
+    {
+        LolRankStatusText.Text := "Riot ID를 게임이름#태그 형식으로 입력해주세요."
+        return
+    }
+
+    if (LolWorkerBaseUrl = "")
+    {
+        LolRankStatusText.Text := "Cloudflare Worker 배포 후 조회할 수 있습니다."
+        return
+    }
+
+    if IsObject(LolRankHttp)
+    {
+        LolRankStatusText.Text := "이미 조회 중입니다. 잠시만 기다려주세요."
+        return
+    }
+
+    NowTick := A_TickCount
+    if (
+        LolRankLastRequestTick
+        && NowTick - LolRankLastRequestTick < LolRankCooldownSeconds * 1000
+    )
+    {
+        WaitSeconds := Ceil(
+            (LolRankCooldownSeconds * 1000 - (NowTick - LolRankLastRequestTick)) / 1000
+        )
+        LolRankStatusText.Text := "요청 간격 제한입니다. " . WaitSeconds . "초 후 다시 조회해주세요."
+        return
+    }
+
+    try
+    {
+        IniWrite(RiotId, LolRankSettingsFile, "LoL", "LastRiotId")
+    }
+
+    LolRankNameText.Text := RiotId
+    LolRankRankText.Text := ""
+    LolRankRecordText.Text := ""
+    LolRankRateText.Text := ""
+    LolRankStatusText.Text := "Riot API 조회 중..."
+
+    RequestUrl := Trim(LolWorkerBaseUrl, "/")
+        . "/lol/rank?gameName=" . UrlEncodeUtf8(GameName)
+        . "&tagLine=" . UrlEncodeUtf8(TagLine)
+
+    try
+    {
+        Http := ComObject("WinHttp.WinHttpRequest.5.1")
+        Http.Open("GET", RequestUrl, true)
+        Http.SetTimeouts(3000, 3000, 5000, 20000)
+        Http.SetRequestHeader("Accept", "application/json")
+        Http.Send()
+
+        LolRankHttp := Http
+        LolRankLastRequestTick := A_TickCount
+        LolRankRequestStartedTick := A_TickCount
+        SetTimer(PollLolRankRequest, 120)
+    }
+    catch
+    {
+        LolRankHttp := 0
+        LolRankStatusText.Text := "조회 요청을 시작하지 못했습니다. 인터넷 연결을 확인해주세요."
+    }
+}
+
+
+PollLolRankRequest()
+{
+    global LolRankHttp
+    global LolRankRequestStartedTick
+    global LolRankStatusText
+
+    if !IsObject(LolRankHttp)
+    {
+        SetTimer(PollLolRankRequest, 0)
+        return
+    }
+
+    if (A_TickCount - LolRankRequestStartedTick > 25000)
+    {
+        try LolRankHttp.Abort()
+        LolRankHttp := 0
+        SetTimer(PollLolRankRequest, 0)
+        LolRankStatusText.Text := "응답 시간이 초과됐습니다. 잠시 후 다시 시도해주세요."
+        return
+    }
+
+    try
+    {
+        if (LolRankHttp.ReadyState != 4)
+            return
+
+        StatusCode := LolRankHttp.Status
+        ResponseText := ReadWinHttpResponseUtf8(LolRankHttp)
+        LolRankHttp := 0
+        SetTimer(PollLolRankRequest, 0)
+        HandleLolRankResponse(StatusCode, ResponseText)
+    }
+    catch
+    {
+        LolRankHttp := 0
+        SetTimer(PollLolRankRequest, 0)
+        LolRankStatusText.Text := "응답을 읽지 못했습니다. 인터넷 연결 또는 서버 상태를 확인해주세요."
+    }
+}
+
+
+HandleLolRankResponse(StatusCode, ResponseText)
+{
+    global LolRankStatusText
+    global LolRankNameText
+    global LolRankRankText
+    global LolRankRecordText
+    global LolRankRateText
+
+    if !RegExMatch(ResponseText, '"success"\s*:\s*true')
+    {
+        ErrorCode := GetJsonStringField(ResponseText, "error")
+        LolRankStatusText.Text := LolRankErrorMessage(ErrorCode, StatusCode)
+        return
+    }
+
+    Tier := GetJsonStringField(ResponseText, "tier")
+    Rank := GetJsonStringField(ResponseText, "rank")
+    Wins := GetJsonNumberField(ResponseText, "wins")
+    Losses := GetJsonNumberField(ResponseText, "losses")
+    LeaguePoints := GetJsonNumberField(ResponseText, "leaguePoints")
+    WinRate := GetJsonNumberField(ResponseText, "winRate")
+    GameName := GetJsonStringField(ResponseText, "gameName")
+    TagLine := GetJsonStringField(ResponseText, "tagLine")
+
+    if (
+        Tier = ""
+        || Rank = ""
+        || Wins = ""
+        || Losses = ""
+        || LeaguePoints = ""
+    )
+    {
+        LolRankStatusText.Text := "서버 응답 형식이 올바르지 않습니다."
+        return
+    }
+
+    LolRankNameText.Text := GameName . "#" . TagLine
+    LolRankRankText.Text := Tier . " " . Rank . "  ·  " . LeaguePoints . " LP"
+    LolRankRecordText.Text := Wins . "승  " . Losses . "패"
+    LolRankRateText.Text := (WinRate = "" ? "" : Format("승률 {:.1f}%", WinRate))
+    LolRankStatusText.Text := "조회 완료"
+}
+
+
+LolRankErrorMessage(ErrorCode, StatusCode)
+{
+    switch ErrorCode
+    {
+        case "INVALID_RIOT_ID":
+            return "Riot ID 형식을 확인해주세요."
+        case "ACCOUNT_NOT_FOUND":
+            return "해당 Riot ID 계정을 찾지 못했습니다."
+        case "UNRANKED":
+            return "이번 시즌 솔로랭크 배정 정보가 없습니다."
+        case "RIOT_RATE_LIMITED", "TOO_MANY_REQUESTS":
+            return "요청이 많습니다. 잠시 후 다시 시도해주세요."
+        case "RIOT_TIMEOUT", "RIOT_UNAVAILABLE":
+            return "Riot API가 응답하지 않습니다. 잠시 후 다시 시도해주세요."
+        case "RIOT_API_KEY_INVALID_OR_FORBIDDEN":
+            return "랭크 서버 설정에 문제가 있습니다. 관리자에게 문의해주세요."
+        case "WORKER_NOT_CONFIGURED":
+            return "랭크 서버 설정이 완료되지 않았습니다."
+        default:
+            return "조회에 실패했습니다. (HTTP " . StatusCode . ") 인터넷 또는 서버 상태를 확인해주세요."
+    }
+}
+
+
+GetJsonNumberField(Response, FieldName)
+{
+    Pattern := '"' . FieldName . '"\s*:\s*(-?\d+(?:\.\d+)?)'
+    if !RegExMatch(Response, Pattern, &Match)
+        return ""
+    return Match[1]
+}
+
+
+ReadWinHttpResponseUtf8(Http)
+{
+    try
+    {
+        ResponseStream := ComObject("ADODB.Stream")
+        ResponseStream.Type := 1
+        ResponseStream.Open()
+        ResponseStream.Write(Http.ResponseBody)
+        ResponseStream.Position := 0
+        ResponseStream.Type := 2
+        ResponseStream.Charset := "utf-8"
+        ResponseText := ResponseStream.ReadText()
+        ResponseStream.Close()
+        return ResponseText
+    }
+    catch
+    {
+        try ResponseStream.Close()
+        return Http.ResponseText
+    }
+}
+
+
+UrlEncodeUtf8(Value)
+{
+    ByteCount := StrPut(Value, "UTF-8")
+    Utf8Buffer := Buffer(ByteCount)
+    StrPut(Value, Utf8Buffer, "UTF-8")
+    Encoded := ""
+
+    Loop (ByteCount - 1)
+    {
+        Byte := NumGet(Utf8Buffer, A_Index - 1, "UChar")
+        if (
+            (Byte >= 0x41 && Byte <= 0x5A)
+            || (Byte >= 0x61 && Byte <= 0x7A)
+            || (Byte >= 0x30 && Byte <= 0x39)
+            || Byte = 0x2D || Byte = 0x2E || Byte = 0x5F || Byte = 0x7E
+        )
+            Encoded .= Chr(Byte)
+        else
+            Encoded .= "%" . Format("{:02X}", Byte)
+    }
+
+    return Encoded
+}
+
+
+CloseLolRankGui(*)
+{
+    global LolRankGuiObj
+    global LolRankHttp
+    global LolGameStatusText
+
+    SetTimer(PollLolRankRequest, 0)
+    if IsObject(LolRankHttp)
+    {
+        try LolRankHttp.Abort()
+    }
+    LolRankHttp := 0
+    ; Game status polling belongs to the app lifetime, not the GUI lifetime.
+    LolGameStatusText := 0
+    LolRankGuiObj := 0
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
