@@ -1,9 +1,9 @@
-﻿dogcake proviewer
+dogcake proviewer
 =================
 
 치지직 방송 감시 및 방송 타임라인 기록 프로그램
 
-현재 버전: v1.8.79
+현재 버전: v1.8.94
 
 dogcake proviewer는 치지직 방송 상태를 감시하면서 방송 중 원하는 순간을 타임라인으로 기록하고, 이후 치지직 VOD가 업로드되면 해당 타임라인을 VOD의 실제 재생 위치와 자동으로 연결하는 AutoHotkey v2 기반 프로그램입니다.
 
